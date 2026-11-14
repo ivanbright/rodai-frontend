@@ -1,5 +1,4 @@
 import { ChangeEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from 'react';
-import { SimulationLab } from './SimulationLab';
 import { apiUrl, apiWebSocketUrl } from './api';
 import {
   CAMERA_PROFILES_STORAGE_KEY,
@@ -10,6 +9,7 @@ import {
   type CameraMeasurementProfile,
 } from './cameraProfiles';
 import { countLineCrossings, type CountingLine, type ImagePoint } from './movement';
+import { findPotentialConflicts } from './conflicts';
 
 type Health = {
   status: 'healthy' | 'degraded';
@@ -68,7 +68,6 @@ function readCameraProfiles(): CameraMeasurementProfile[] {
 }
 
 export function App() {
-  const [activeWorkspace, setActiveWorkspace] = useState<'lab' | 'video'>('video');
   const [health, setHealth] = useState<Health | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [video, setVideo] = useState<File | null>(null);
@@ -95,6 +94,8 @@ export function App() {
   const cameraPausedRef = useRef(false);
   const [cameraTracks, setCameraTracks] = useState<RoadTrack[]>([]);
   const [videoTracks, setVideoTracks] = useState<RoadTrack[]>([]);
+  const videoConflicts = useMemo(() => findPotentialConflicts(videoTracks), [videoTracks]);
+  const cameraConflicts = useMemo(() => findPotentialConflicts(cameraTracks), [cameraTracks]);
   const [videoSummary, setVideoSummary] = useState<TrackingSummary | null>(null);
   const [countingLine, setCountingLine] = useState<CountingLine | null>(null);
   const [cameraProfiles, setCameraProfiles] = useState<CameraMeasurementProfile[]>(readCameraProfiles);
@@ -183,27 +184,38 @@ export function App() {
   useEffect(() => {
     if (!session || ['completed', 'failed', 'stopped'].includes(session.status)) return;
     let active = true;
-    const timer = window.setInterval(async () => {
+    let failures = 0;
+    let timer = 0;
+    const refreshSession = async () => {
       try {
         const response = await fetch(apiUrl(`/api/v1/sessions/${session.id}`));
         if (!response.ok) throw new Error(`Session status returned ${response.status}`);
         const current = (await response.json()) as VideoSession;
-        if (active) setSession(current);
+        failures = 0;
+        if (active) {
+          setSessionError(null);
+          setSession(current);
+        }
         if (['completed', 'failed', 'stopped'].includes(current.status)) {
-          window.clearInterval(timer);
           fetch(apiUrl('/api/v1/sessions?limit=20'))
             .then((result) => result.json() as Promise<VideoSession[]>)
             .then((items) => setRecentSessions(items))
             .catch(() => undefined);
+          return;
         }
       } catch {
-        if (active) setSessionError('Could not refresh session progress. Check the backend connection.');
-        window.clearInterval(timer);
+        failures += 1;
+        if (failures >= 4) {
+          if (active) setSessionError('RodAI could not refresh this session after several attempts. Check the session error below and the API service logs.');
+          return;
+        }
       }
-    }, 700);
+      if (active) timer = window.setTimeout(refreshSession, failures ? 1200 : 700);
+    };
+    timer = window.setTimeout(refreshSession, 700);
     return () => {
       active = false;
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
   }, [session?.id]);
 
@@ -841,12 +853,8 @@ export function App() {
           <img className="brand-mark" src="/brand/rodai-mark.svg" alt="" />
           <span className="brand-wordmark">Rod<span>AI</span></span>
         </div>
-        <nav className="workspace-tabs" aria-label="RodAI workspaces">
-          <button type="button" className={activeWorkspace === 'lab' ? 'active' : ''} onClick={() => setActiveWorkspace('lab')}>Simulation lab</button>
-          <button type="button" className={activeWorkspace === 'video' ? 'active' : ''} onClick={() => setActiveWorkspace('video')}>Video analysis</button>
-        </nav>
       </header>
-      {activeWorkspace === 'lab' ? <SimulationLab /> : <section className="workspace video-layout" aria-labelledby="welcome-title">
+      <section className="workspace video-layout" aria-labelledby="welcome-title">
         <div className="scene">
           <div className="scene-header">
             <div><p className="eyebrow">PERCEPTION WORKSPACE</p><h1 id="welcome-title">Road scene</h1></div>
@@ -919,9 +927,11 @@ export function App() {
                     {videoTracks.map((track) => {
                       const [x1, y1, x2, y2] = track.bbox_xyxy;
                       const points = track.trail_xy.map(([x, y]) => `${x},${y}`).join(' ');
-                      return <g key={track.track_id}>
+                      const flagged = videoConflicts.some((conflict) => conflict.trackIds.includes(track.track_id));
+                      return <g key={track.track_id} className={flagged ? 'conflict-track' : undefined}>
                         {track.trail_xy.length > 1 && <polyline className="track-trail" points={points} />}
-                        <rect x={x1} y={y1} width={x2 - x1} height={y2 - y1} />
+                        <rect className={flagged ? 'risk-track-box' : undefined} x={x1} y={y1} width={x2 - x1} height={y2 - y1} />
+                        {flagged && <circle className="risk-beacon" cx={x2 - 8} cy={y1 + 8} r="7" />}
                         <text x={x1} y={Math.max(18, y1 - 5)}>#{track.track_id} {track.label}{track.speed_px_s === null ? '' : ` · ${track.speed_px_s.toFixed(0)} px/s`}</text>
                       </g>;
                     })}
@@ -943,6 +953,10 @@ export function App() {
                   <span>{session.analysis_fps ?? 2} analyzed FPS · boxes interpolate between samples</span>
                 </div>}
               </div>
+              {videoConflicts.length > 0 && <div className="conflict-alert" role="status" aria-live="polite">
+                <span className="conflict-beacon" aria-hidden="true" />
+                <div><strong>Potential trajectory conflict</strong><p>{videoConflicts.map((conflict) => `#${conflict.trackIds[0]} ${conflict.labels[0]} + #${conflict.trackIds[1]} ${conflict.labels[1]} · about ${conflict.timeToClosestApproachSeconds.toFixed(1)} s`).join(' | ')}</p></div>
+              </div>}
               {session && ['completed', 'stopped'].includes(session.status) && session.processed_frames > 0 && session.source_type !== 'browser_camera' && (
                 <div className="count-line-tools">
                   <button type="button" className="secondary-button" aria-pressed={settingCountingLine}
@@ -996,15 +1010,21 @@ export function App() {
                     {cameraTracks.map((track) => {
                       const [x1, y1, x2, y2] = track.bbox_xyxy;
                       const points = track.trail_xy.map(([x, y]) => `${x},${y}`).join(' ');
-                      return <g key={track.track_id}>
+                      const flagged = cameraConflicts.some((conflict) => conflict.trackIds.includes(track.track_id));
+                      return <g key={track.track_id} className={flagged ? 'conflict-track' : undefined}>
                         {track.trail_xy.length > 1 && <polyline className="track-trail" points={points} />}
-                        <rect x={x1} y={y1} width={x2 - x1} height={y2 - y1} />
+                        <rect className={flagged ? 'risk-track-box' : undefined} x={x1} y={y1} width={x2 - x1} height={y2 - y1} />
+                        {flagged && <circle className="risk-beacon" cx={x2 - 8} cy={y1 + 8} r="7" />}
                         <text x={x1} y={Math.max(18, y1 - 5)}>#{track.track_id} {track.label}{track.speed_px_s === null ? '' : ` · ${track.speed_px_s.toFixed(0)} px/s`}</text>
                       </g>;
                     })}
                   </svg>
                 )}
                 <canvas ref={cameraCanvasRef} hidden />
+                {cameraConflicts.length > 0 && <div className="conflict-alert live-conflict-alert" role="status" aria-live="polite">
+                  <span className="conflict-beacon" aria-hidden="true" />
+                  <div><strong>Potential trajectory conflict</strong><p>{cameraConflicts.map((conflict) => `#${conflict.trackIds[0]} + #${conflict.trackIds[1]} · ~${conflict.timeToClosestApproachSeconds.toFixed(1)} s`).join(' | ')}</p></div>
+                </div>}
               </div>
             )}
 
@@ -1044,7 +1064,7 @@ export function App() {
                 {session.status === 'stopped' && session.processed_frames > 0 && (
                   <p>Stopped after analyzing {session.processed_frames.toLocaleString()} frames. The annotated preview and partial frame report cover the portion analyzed.</p>
                 )}
-                {session.status === 'failed' && <p className="error-message" role="alert">{session.error}</p>}
+                {session.status === 'failed' && <p className="error-message" role="alert">{session.error ?? 'Video processing failed without a detailed message. Check the API service logs for this session.'}</p>}
                 {session.source_type !== 'browser_camera' && videoSummary && (
                   <section className="tracking-summary" aria-label="Road user tracking summary">
                     <div><span>Track IDs</span><strong>{videoSummary.trackIds.toLocaleString()}</strong></div>
@@ -1148,7 +1168,7 @@ export function App() {
               </div>
             )}
           </section>
-          <footer className="scene-footer">Object detection is enabled in the Compose demo. Tracking, physical speed estimation and crash prediction are not implemented.</footer>
+          <footer className="scene-footer">Experimental image-plane conflict cues use sampled prototype tracks. They are unvalidated and are not crash predictions or safety advice.</footer>
         </div>
         <aside className="status-panel" aria-label="System status">
           <h2>System status</h2>
@@ -1168,9 +1188,9 @@ export function App() {
             ? 'The CPU detector loads when the first video analysis starts after an API restart. Once loaded, it stays ready until the service restarts.'
             : health?.model.status === 'failed'
               ? 'The detector could not load. Check the API service logs before retrying video analysis.'
-              : 'DETR detects common road users in video. It does not predict crashes or support safety decisions.'}</p>
+              : 'Red cues show track pairs whose current image-plane paths may converge soon. This experimental heuristic is unvalidated, may miss or falsely flag events, and does not predict or prevent crashes.'}</p>
         </aside>
-      </section>}
+      </section>
       <footer className="app-footer">
         <strong>RodAI</strong>
         <span>Local-first road perception laboratory</span>
