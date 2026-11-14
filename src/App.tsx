@@ -1,6 +1,7 @@
-import { ChangeEvent, useEffect, useRef, useState } from 'react';
+import { ChangeEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { SimulationLab } from './SimulationLab';
 import { apiUrl, apiWebSocketUrl } from './api';
+import { countLineCrossings, type CountingLine, type ImagePoint } from './movement';
 
 type Health = {
   status: 'healthy' | 'degraded';
@@ -78,6 +79,10 @@ export function App() {
   const [cameraTracks, setCameraTracks] = useState<RoadTrack[]>([]);
   const [videoTracks, setVideoTracks] = useState<RoadTrack[]>([]);
   const [videoSummary, setVideoSummary] = useState<TrackingSummary | null>(null);
+  const [countingLine, setCountingLine] = useState<CountingLine | null>(null);
+  const [lineDraft, setLineDraft] = useState<CountingLine | null>(null);
+  const [settingCountingLine, setSettingCountingLine] = useState(false);
+  const lineStartRef = useRef<ImagePoint | null>(null);
   const [exportProgress, setExportProgress] = useState<number | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const detectionFramesRef = useRef<DetectionFrame[]>([]);
@@ -85,6 +90,10 @@ export function App() {
   const videoStageRef = useRef<HTMLDivElement | null>(null);
   const overlayAnimationRef = useRef<number | null>(null);
   const [videoFullscreen, setVideoFullscreen] = useState(false);
+  const flowSummary = useMemo(
+    () => countingLine ? countLineCrossings(detectionFramesRef.current, countingLine) : null,
+    [countingLine, videoSummary],
+  );
 
   useEffect(() => {
     const updateFullscreen = () => setVideoFullscreen(document.fullscreenElement === videoStageRef.current);
@@ -219,11 +228,51 @@ export function App() {
     setSessionError(null);
     setUploadProgress(0);
     setVideoSummary(null);
+    setCountingLine(null);
+    setLineDraft(null);
+    setSettingCountingLine(false);
     setVideoTracks([]);
     setExportError(null);
     setExportProgress(null);
     setSavedVideoUrl(null);
     setVideo(event.target.files?.[0] ?? null);
+  }
+
+  function getImagePoint(event: ReactPointerEvent<SVGSVGElement>, width: number, height: number): ImagePoint {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(width, (event.clientX - bounds.left) / bounds.width * width)),
+      y: Math.max(0, Math.min(height, (event.clientY - bounds.top) / bounds.height * height)),
+    };
+  }
+
+  function startCountingLine(event: ReactPointerEvent<SVGSVGElement>, width: number, height: number) {
+    if (!settingCountingLine) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const point = getImagePoint(event, width, height);
+    lineStartRef.current = point;
+    setLineDraft({ start: point, end: point });
+  }
+
+  function moveCountingLine(event: ReactPointerEvent<SVGSVGElement>, width: number, height: number) {
+    if (!settingCountingLine || !lineStartRef.current) return;
+    setLineDraft({ start: lineStartRef.current, end: getImagePoint(event, width, height) });
+  }
+
+  function finishCountingLine(event: ReactPointerEvent<SVGSVGElement>, width: number, height: number) {
+    const start = lineStartRef.current;
+    if (!settingCountingLine || !start) return;
+    const end = getImagePoint(event, width, height);
+    lineStartRef.current = null;
+    setLineDraft(null);
+    if (Math.hypot(end.x - start.x, end.y - start.y) < 24) {
+      setSessionError('Drag a line across the road in the video to set a count line.');
+      return;
+    }
+    setSessionError(null);
+    setCountingLine({ start, end });
+    setSettingCountingLine(false);
   }
 
   function uploadVideo() {
@@ -582,6 +631,19 @@ export function App() {
           context.fillStyle = '#eff8ff';
           context.fillText(label, x1 + 6, labelY);
         }
+        if (countingLine) {
+          context.beginPath();
+          context.moveTo(countingLine.start.x, countingLine.start.y);
+          context.lineTo(countingLine.end.x, countingLine.end.y);
+          context.strokeStyle = '#ffd166';
+          context.lineWidth = Math.max(3, width / 320);
+          context.stroke();
+          context.fillStyle = '#ffd166';
+          context.beginPath();
+          context.arc(countingLine.start.x, countingLine.start.y, Math.max(5, width / 100), 0, Math.PI * 2);
+          context.arc(countingLine.end.x, countingLine.end.y, Math.max(5, width / 100), 0, Math.PI * 2);
+          context.fill();
+        }
         context.fillStyle = '#081421c9';
         context.fillRect(0, height - 38, Math.min(width, 340), 38);
         context.fillStyle = '#eff8ff';
@@ -628,6 +690,9 @@ export function App() {
       setSavedVideoUrl(null);
       setVideoSummary(null);
       setVideoTracks([]);
+      setCountingLine(null);
+      setLineDraft(null);
+      setSettingCountingLine(false);
       setRecentSessions((items) => items.filter((item) => item.id !== session.id));
       setUploadProgress(0);
       setSessionError(null);
@@ -665,6 +730,9 @@ export function App() {
       if (!response.ok) throw new Error(`Session returned ${response.status}`);
       const savedSession = (await response.json()) as VideoSession;
       setVideo(null);
+      setCountingLine(null);
+      setLineDraft(null);
+      setSettingCountingLine(false);
       setSavedVideoUrl(savedSession.source_type === 'video' ? apiUrl(`/api/v1/sessions/${sessionId}/video`) : null);
       setSession(savedSession);
     } catch {
@@ -748,7 +816,14 @@ export function App() {
               <div className="video-preview live-video video-stage" ref={videoStageRef} style={{ aspectRatio: session?.metadata ? `${session.metadata.width} / ${session.metadata.height}` : '16 / 9' }}>
                 <video ref={uploadedVideoRef} src={videoSourceUrl} controls controlsList="nofullscreen" preload="metadata" onTimeUpdate={updateVideoDetections} onPlay={animateVideoDetections} onPause={updateVideoDetections} onSeeked={updateVideoDetections} onError={() => setSessionError('The original upload is no longer available. It may have expired; upload the video again to review the overlay.')} aria-label="Road video preview with detection overlay" />
                 {session && ['completed', 'stopped'].includes(session.status) && session.processed_frames > 0 && session.metadata && (
-                  <svg className="detection-overlay" viewBox={`0 0 ${session.metadata.width} ${session.metadata.height}`} aria-label="Detected road objects">
+                  <svg
+                    className={`detection-overlay${settingCountingLine ? ' count-line-editor' : ''}`}
+                    viewBox={`0 0 ${session.metadata.width} ${session.metadata.height}`}
+                    aria-label={settingCountingLine ? 'Drag to draw a traffic count line' : 'Detected road objects'}
+                    onPointerDown={settingCountingLine ? (event) => startCountingLine(event, session.metadata!.width, session.metadata!.height) : undefined}
+                    onPointerMove={settingCountingLine ? (event) => moveCountingLine(event, session.metadata!.width, session.metadata!.height) : undefined}
+                    onPointerUp={settingCountingLine ? (event) => finishCountingLine(event, session.metadata!.width, session.metadata!.height) : undefined}
+                  >
                     {videoTracks.map((track) => {
                       const [x1, y1, x2, y2] = track.bbox_xyxy;
                       const points = track.trail_xy.map(([x, y]) => `${x},${y}`).join(' ');
@@ -758,6 +833,16 @@ export function App() {
                         <text x={x1} y={Math.max(18, y1 - 5)}>#{track.track_id} {track.label}{track.speed_px_s === null ? '' : ` · ${track.speed_px_s.toFixed(0)} px/s`}</text>
                       </g>;
                     })}
+                    {(lineDraft ?? countingLine) && (() => {
+                      const line = lineDraft ?? countingLine!;
+                      return <g className="count-line-mark">
+                        <line x1={line.start.x} y1={line.start.y} x2={line.end.x} y2={line.end.y} />
+                        <circle cx={line.start.x} cy={line.start.y} r="9" />
+                        <circle cx={line.end.x} cy={line.end.y} r="9" />
+                        <text x={line.start.x + 12} y={line.start.y - 12}>A</text>
+                        <text x={line.end.x + 12} y={line.end.y - 12}>B</text>
+                      </g>;
+                    })()}
                   </svg>
                 )}
                 <button type="button" className="fullscreen-button" onClick={toggleVideoFullscreen} aria-label={videoFullscreen ? 'Exit fullscreen video' : 'View video fullscreen'}>{videoFullscreen ? 'Exit fullscreen' : '⛶ Fullscreen'}</button>
@@ -766,6 +851,18 @@ export function App() {
                   <span>{session.analysis_fps ?? 2} analyzed FPS · boxes interpolate between samples</span>
                 </div>}
               </div>
+              {session && ['completed', 'stopped'].includes(session.status) && session.processed_frames > 0 && session.source_type !== 'browser_camera' && (
+                <div className="count-line-tools">
+                  <button type="button" className="secondary-button" aria-pressed={settingCountingLine}
+                    onClick={() => { setSettingCountingLine((active) => !active); setLineDraft(null); lineStartRef.current = null; }}>
+                    {settingCountingLine ? 'Cancel line drawing' : countingLine ? 'Redraw count line' : 'Add traffic count line'}
+                  </button>
+                  {countingLine && <button type="button" className="secondary-button" onClick={() => setCountingLine(null)}>Clear line</button>}
+                  <p>{settingCountingLine
+                    ? 'Drag across the road in the video. The line counts each tracked ID once when its sampled path crosses.'
+                    : 'Set a line across one road segment. Direction is reported as − to + or + to − relative to the A→B line.'}</p>
+                </div>
+              )}
               <p className="viewer-caption">Tracks are drawn from sampled detections. Box motion is interpolated between detector samples for smoother viewing; it does not add new detections.</p>
               </div>
             )}
@@ -827,6 +924,24 @@ export function App() {
                     <div><span>Peak in frame</span><strong>{videoSummary.peakInFrame.toLocaleString()}</strong></div>
                     <div><span>Tracked classes</span><strong>{Object.entries(videoSummary.classes).map(([label, count]) => `${label} ${count}`).join(' · ') || 'None'}</strong></div>
                     <p>Prototype image-plane tracking. IDs may switch or split; motion is not calibrated to metres or km/h.</p>
+                  </section>
+                )}
+                {flowSummary && (
+                  <section className="flow-summary" aria-label="Traffic crossing counts">
+                    <div className="flow-heading"><div><p className="eyebrow">MOVEMENT MEASUREMENT</p><h3>Observed line crossings</h3></div><span>{flowSummary.total} total</span></div>
+                    <div className="flow-counts">
+                      <div><span>− to +</span><strong>{flowSummary.negativeToPositive.toLocaleString()}</strong></div>
+                      <div><span>+ to −</span><strong>{flowSummary.positiveToNegative.toLocaleString()}</strong></div>
+                    </div>
+                    {flowSummary.events.length > 0 && <ul aria-label="Recent line crossings">
+                      {flowSummary.events.slice(-5).reverse().map((event, index) => (
+                        <li key={`${event.trackId}-${event.timestampMs}-${index}`}>
+                          <span>#{event.trackId} {event.label}</span>
+                          <span>{event.direction === 'negative_to_positive' ? '− to +' : '+ to −'} · {event.timestampMs === null ? 'time unknown' : `${(event.timestampMs / 1000).toFixed(1)} s`}</span>
+                        </li>
+                      ))}
+                    </ul>}
+                    <p>Counts come from sampled detections and prototype track IDs. Missed detections or ID switches can undercount or double-count traffic. This is not a calibrated vehicle speed or validated traffic count.</p>
                   </section>
                 )}
                 {session.metadata && (
