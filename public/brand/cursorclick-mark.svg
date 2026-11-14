@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 44">
+  <title>CursorClick pointer and click mark</title>
+  <path d="M14 9 36 29l-10.5 1.2 5 9.4-6.2 3.1-5-9.7-6.6 8Z" fill="#17345f" />
+  <path d="M11 15a7 7 0 0 1 5-6M6 16a12 12 0 0 1 8-11" fill="none" stroke="#188b99" stroke-linecap="square" stroke-width="2.4" />
+  <circle cx="14" cy="9" r="2.2" fill="#ffb86b" stroke="#f7faff" stroke-width="1.2" />
+</svg>

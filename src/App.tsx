@@ -34,7 +34,10 @@ export function App() {
   return (
     <main className="shell">
       <header className="topbar">
-        <div className="brand"><span className="brand-mark" aria-hidden="true">R</span><span>RodAI</span></div>
+        <div className="brand" aria-label="RodAI">
+          <img className="brand-mark" src="/brand/rodai-mark.svg" alt="" />
+          <span className="brand-wordmark">Rod<span>AI</span></span>
+        </div>
         <span className="phase-label">FOUNDATION</span>
       </header>
       <section className="workspace" aria-labelledby="welcome-title">
@@ -66,7 +69,16 @@ export function App() {
           <p className="panel-note">Status comes from the running backend. This foundation build does not run inference.</p>
         </aside>
       </section>
-      <footer className="app-footer"><strong>RodAI</strong><span>Local-first road perception laboratory</span></footer>
+      <footer className="app-footer">
+        <strong>RodAI</strong>
+        <span>Local-first road perception laboratory</span>
+        <span className="product-credit">
+          A product by <a className="parent-brand" href="https://cursorclick.dev" target="_blank" rel="noreferrer" aria-label="CursorClick.dev, the RodAI product studio">
+            <img src="/brand/cursorclick-mark.svg" alt="" />
+            <span>CursorClick<span className="parent-domain">.dev</span></span>
+          </a>
+        </span>
+      </footer>
     </main>
   );
 }
