@@ -1046,12 +1046,16 @@ export function App() {
             <div><dt>Backend</dt><dd>{health.status}</dd></div>
             <div><dt>Database</dt><dd>{health.database.status}</dd></div>
             <div><dt>Processing device</dt><dd>{health.device.selected}</dd></div>
-            <div><dt>Detector</dt><dd>{health.model.status}</dd></div>
+            <div><dt>Detector</dt><dd>{friendlyDetectorStatus(health.model.status)}</dd></div>
             <div><dt>Retention cleanup</dt><dd>{health.retention.status}{health.retention.failed_deletions ? ` · ${health.retention.failed_deletions} retry` : ''}</dd></div>
             <div><dt>Data volume</dt><dd>{health.volume.status}</dd></div>
             {health.volume.free_bytes !== undefined && <div><dt>Free space</dt><dd>{formatBytes(health.volume.free_bytes)}</dd></div>}
           </dl>}
-          <p className="panel-note">DETR detects common road users in video. It does not predict crashes or support safety decisions.</p>
+          <p className="panel-note">{health?.model.status === 'not_loaded'
+            ? 'The CPU detector loads when the first video analysis starts after an API restart. Once loaded, it stays ready until the service restarts.'
+            : health?.model.status === 'failed'
+              ? 'The detector could not load. Check the API service logs before retrying video analysis.'
+              : 'DETR detects common road users in video. It does not predict crashes or support safety decisions.'}</p>
         </aside>
       </section>}
       <footer className="app-footer">
@@ -1080,6 +1084,17 @@ function friendlyStatus(status: VideoSession['status']): string {
     failed: 'Failed',
   };
   return labels[status];
+}
+
+function friendlyDetectorStatus(status: string): string {
+  const labels: Record<string, string> = {
+    available: 'Ready',
+    loading: 'Loading model',
+    not_loaded: 'Loads on first analysis',
+    failed: 'Failed to load',
+    unavailable: 'Not configured',
+  };
+  return labels[status] ?? status;
 }
 
 function formatDuration(milliseconds: number): string {
