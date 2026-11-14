@@ -1,5 +1,6 @@
 import { ChangeEvent, useEffect, useRef, useState } from 'react';
 import { SimulationLab } from './SimulationLab';
+import { apiUrl, apiWebSocketUrl } from './api';
 
 type Health = {
   status: 'healthy' | 'degraded';
@@ -93,7 +94,7 @@ export function App() {
 
   useEffect(() => {
     let active = true;
-    fetch('/api/v1/health')
+    fetch(apiUrl('/api/v1/health'))
       .then(async (response) => {
         if (!response.ok) throw new Error(`Health endpoint returned ${response.status}`);
         return (await response.json()) as Health;
@@ -104,7 +105,7 @@ export function App() {
       .catch(() => {
         if (active) setError('RodAI backend is not reachable. Start the local services and refresh.');
       });
-    fetch('/api/v1/sessions?limit=20')
+    fetch(apiUrl('/api/v1/sessions?limit=20'))
       .then(async (response) => {
         if (!response.ok) throw new Error(`Session list returned ${response.status}`);
         return (await response.json()) as VideoSession[];
@@ -120,7 +121,7 @@ export function App() {
       })
       .catch(() => undefined);
     const healthTimer = window.setInterval(() => {
-      fetch('/api/v1/health')
+      fetch(apiUrl('/api/v1/health'))
         .then((response) => response.ok ? response.json() as Promise<Health> : null)
         .then((data) => { if (active && data) setHealth(data); })
         .catch(() => undefined);
@@ -154,13 +155,13 @@ export function App() {
     let active = true;
     const timer = window.setInterval(async () => {
       try {
-        const response = await fetch(`/api/v1/sessions/${session.id}`);
+        const response = await fetch(apiUrl(`/api/v1/sessions/${session.id}`));
         if (!response.ok) throw new Error(`Session status returned ${response.status}`);
         const current = (await response.json()) as VideoSession;
         if (active) setSession(current);
         if (['completed', 'failed', 'stopped'].includes(current.status)) {
           window.clearInterval(timer);
-          fetch('/api/v1/sessions?limit=20')
+          fetch(apiUrl('/api/v1/sessions?limit=20'))
             .then((result) => result.json() as Promise<VideoSession[]>)
             .then((items) => setRecentSessions(items))
             .catch(() => undefined);
@@ -180,7 +181,7 @@ export function App() {
     if (!session || session.source_type === 'browser_camera' || !videoSourceUrl
       || !['completed', 'stopped'].includes(session.status) || session.processed_frames === 0) return;
     let active = true;
-    fetch(session.result_url)
+    fetch(apiUrl(session.result_url))
       .then(async (response) => {
         if (!response.ok) throw new Error(`Results returned ${response.status}`);
         return response.text();
@@ -231,7 +232,7 @@ export function App() {
     setUploadProgress(0);
     const xhr = new XMLHttpRequest();
     const query = new URLSearchParams({ filename: video.name, analysis_fps: String(analysisFps) });
-    xhr.open('POST', `/api/v1/sessions/video?${query.toString()}`);
+    xhr.open('POST', apiUrl(`/api/v1/sessions/video?${query.toString()}`));
     xhr.setRequestHeader('Content-Type', video.type || 'application/octet-stream');
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) {
@@ -252,7 +253,7 @@ export function App() {
         return;
       }
       setSession(payload as VideoSession);
-      fetch('/api/v1/sessions?limit=20')
+      fetch(apiUrl('/api/v1/sessions?limit=20'))
         .then((response) => response.json() as Promise<VideoSession[]>)
         .then(setRecentSessions)
         .catch(() => undefined);
@@ -271,7 +272,7 @@ export function App() {
       stream = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: cameraSize.width }, height: { ideal: cameraSize.height } }, audio: false,
       });
-      const response = await fetch('/api/v1/sessions/live', {
+      const response = await fetch(apiUrl('/api/v1/sessions/live'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ max_width: cameraSize.width, max_height: cameraSize.height, jpeg_quality: cameraQuality }),
       });
@@ -288,9 +289,7 @@ export function App() {
       cameraInFlightRef.current = false;
       cameraPausedRef.current = false;
 
-      const websocketUrl = new URL(`/api/v1/sessions/ws/${liveSession.id}`, window.location.href);
-      websocketUrl.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const socket = new WebSocket(websocketUrl);
+      const socket = new WebSocket(apiWebSocketUrl(`/api/v1/sessions/ws/${liveSession.id}`));
       cameraSocketRef.current = socket;
       socket.onopen = () => {
         cameraTimerRef.current = window.setInterval(() => {
@@ -370,7 +369,7 @@ export function App() {
       socket.onerror = () => setSessionError('The camera stream could not reach the backend.');
       socket.onclose = () => {
         releaseCamera();
-        fetch(`/api/v1/sessions/${liveSession.id}`)
+        fetch(apiUrl(`/api/v1/sessions/${liveSession.id}`))
           .then((result) => result.ok ? result.json() as Promise<VideoSession> : null)
           .then((current) => { if (current) setSession(current); })
           .catch(() => undefined);
@@ -622,7 +621,7 @@ export function App() {
   async function deleteSession() {
     if (!session) return;
     try {
-      const response = await fetch(`/api/v1/sessions/${session.id}`, { method: 'DELETE' });
+      const response = await fetch(apiUrl(`/api/v1/sessions/${session.id}`), { method: 'DELETE' });
       if (!response.ok) throw new Error(`Delete returned ${response.status}`);
       setSession(null);
       setVideo(null);
@@ -641,7 +640,7 @@ export function App() {
     if (!session) return;
     setSessionError(null);
     try {
-      const response = await fetch(`/api/v1/sessions/${session.id}/${action}`, { method: 'POST' });
+      const response = await fetch(apiUrl(`/api/v1/sessions/${session.id}/${action}`), { method: 'POST' });
       const payload = (await response.json()) as VideoSession | { detail?: string };
       if (!response.ok) {
         throw new Error('detail' in payload ? payload.detail ?? 'Session control failed.' : 'Session control failed.');
@@ -662,11 +661,11 @@ export function App() {
   async function openSession(sessionId: string) {
     setSessionError(null);
     try {
-      const response = await fetch(`/api/v1/sessions/${sessionId}`);
+      const response = await fetch(apiUrl(`/api/v1/sessions/${sessionId}`));
       if (!response.ok) throw new Error(`Session returned ${response.status}`);
       const savedSession = (await response.json()) as VideoSession;
       setVideo(null);
-      setSavedVideoUrl(savedSession.source_type === 'video' ? `/api/v1/sessions/${sessionId}/video` : null);
+      setSavedVideoUrl(savedSession.source_type === 'video' ? apiUrl(`/api/v1/sessions/${sessionId}/video`) : null);
       setSession(savedSession);
     } catch {
       setSessionError('Could not open this saved session. Refresh the page and try again.');
@@ -877,7 +876,7 @@ export function App() {
                   <details className="technical-results">
                     <summary>Technical data for developers</summary>
                     <p>JSONL is a machine-readable record with one line per analyzed video frame. It helps inspect detections and build integrations; you do not need it to watch the annotated video.</p>
-                    <a className="download-link" href={session.result_url}>Download frame data (.jsonl)</a>
+                    <a className="download-link" href={apiUrl(session.result_url)}>Download frame data (.jsonl)</a>
                   </details>
                 )}
               </div>
