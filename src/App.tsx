@@ -1,6 +1,14 @@
 import { ChangeEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { SimulationLab } from './SimulationLab';
 import { apiUrl, apiWebSocketUrl } from './api';
+import {
+  CAMERA_PROFILES_STORAGE_KEY,
+  lineForCameraProfile,
+  makeCameraProfile,
+  parseCameraProfiles,
+  serializeCameraProfiles,
+  type CameraMeasurementProfile,
+} from './cameraProfiles';
 import { countLineCrossings, type CountingLine, type ImagePoint } from './movement';
 
 type Health = {
@@ -51,6 +59,14 @@ type TrackingSummary = { trackIds: number; peakInFrame: number; classes: Record<
 
 const CAMERA_SIZES = [{ width: 640, height: 360 }, { width: 960, height: 540 }, { width: 1280, height: 720 }];
 
+function readCameraProfiles(): CameraMeasurementProfile[] {
+  try {
+    return parseCameraProfiles(window.localStorage.getItem(CAMERA_PROFILES_STORAGE_KEY));
+  } catch {
+    return [];
+  }
+}
+
 export function App() {
   const [activeWorkspace, setActiveWorkspace] = useState<'lab' | 'video'>('video');
   const [health, setHealth] = useState<Health | null>(null);
@@ -81,6 +97,10 @@ export function App() {
   const [videoTracks, setVideoTracks] = useState<RoadTrack[]>([]);
   const [videoSummary, setVideoSummary] = useState<TrackingSummary | null>(null);
   const [countingLine, setCountingLine] = useState<CountingLine | null>(null);
+  const [cameraProfiles, setCameraProfiles] = useState<CameraMeasurementProfile[]>(readCameraProfiles);
+  const [cameraProfileName, setCameraProfileName] = useState('');
+  const [selectedCameraProfileId, setSelectedCameraProfileId] = useState('');
+  const [cameraProfileNotice, setCameraProfileNotice] = useState<string | null>(null);
   const [lineDraft, setLineDraft] = useState<CountingLine | null>(null);
   const [settingCountingLine, setSettingCountingLine] = useState(false);
   const lineStartRef = useRef<ImagePoint | null>(null);
@@ -274,6 +294,70 @@ export function App() {
     setSessionError(null);
     setCountingLine({ start, end });
     setSettingCountingLine(false);
+  }
+
+  function storeCameraProfiles(profiles: CameraMeasurementProfile[]): boolean {
+    try {
+      window.localStorage.setItem(CAMERA_PROFILES_STORAGE_KEY, serializeCameraProfiles(profiles));
+      setCameraProfiles(profiles);
+      return true;
+    } catch {
+      setCameraProfileNotice('RodAI could not save profiles in this browser. Check its storage settings and available space.');
+      return false;
+    }
+  }
+
+  function saveCameraProfile() {
+    if (!countingLine || !session?.metadata) return;
+    const name = cameraProfileName.trim();
+    if (!name) {
+      setCameraProfileNotice('Enter a name for this fixed camera view.');
+      return;
+    }
+    if (cameraProfiles.some((profile) => profile.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
+      setCameraProfileNotice('A profile with that name already exists. Choose another name.');
+      return;
+    }
+    if (cameraProfiles.length >= 100) {
+      setCameraProfileNotice('This browser already has 100 saved profiles. Delete one before adding another.');
+      return;
+    }
+    const profile = makeCameraProfile(
+      window.crypto.randomUUID(), name, countingLine, session.metadata.width, session.metadata.height,
+    );
+    if (!profile) {
+      setCameraProfileNotice('This line or video size cannot be saved as a camera profile.');
+      return;
+    }
+    if (storeCameraProfiles([profile, ...cameraProfiles])) {
+      setCameraProfileName('');
+      setSelectedCameraProfileId(profile.id);
+      setCameraProfileNotice(`Saved “${profile.name}” in this browser.`);
+    }
+  }
+
+  function applyCameraProfile() {
+    const profile = cameraProfiles.find((item) => item.id === selectedCameraProfileId);
+    if (!profile || !session?.metadata) return;
+    const line = lineForCameraProfile(profile, session.metadata.width, session.metadata.height);
+    if (!line) {
+      setCameraProfileNotice('This video has a different aspect ratio. Draw and save a new line for this camera view.');
+      return;
+    }
+    setCountingLine(line);
+    setSettingCountingLine(false);
+    setLineDraft(null);
+    setCameraProfileNotice(`Applied “${profile.name}”. Confirm the line matches this camera view before using its counts.`);
+  }
+
+  function deleteCameraProfile() {
+    const profile = cameraProfiles.find((item) => item.id === selectedCameraProfileId);
+    if (!profile) return;
+    const remaining = cameraProfiles.filter((item) => item.id !== profile.id);
+    if (storeCameraProfiles(remaining)) {
+      setSelectedCameraProfileId('');
+      setCameraProfileNotice(`Deleted “${profile.name}” from this browser.`);
+    }
   }
 
   function uploadVideo() {
@@ -869,6 +953,35 @@ export function App() {
                   <p>{settingCountingLine
                     ? 'Drag across the road in the video. The line counts each tracked ID once when its sampled path crosses.'
                     : 'Set a line across one road segment. Direction is reported as − to + or + to − relative to the A→B line.'}</p>
+                  <div className="camera-profile-tools" aria-label="Saved fixed camera profiles">
+                    <div className="camera-profile-save">
+                      <label htmlFor="camera-profile-name">Save this line for a fixed camera view
+                        <input id="camera-profile-name" type="text" maxLength={60} value={cameraProfileName}
+                          onChange={(event) => setCameraProfileName(event.target.value)}
+                          placeholder="e.g. Junction north view" disabled={!countingLine} />
+                      </label>
+                      <button type="button" className="secondary-button" onClick={saveCameraProfile} disabled={!countingLine}>
+                        Save camera profile
+                      </button>
+                    </div>
+                    {cameraProfiles.length > 0 && <div className="camera-profile-apply">
+                      <label htmlFor="saved-camera-profile">Saved profiles
+                        <select id="saved-camera-profile" value={selectedCameraProfileId}
+                          onChange={(event) => { setSelectedCameraProfileId(event.target.value); setCameraProfileNotice(null); }}>
+                          <option value="">Choose a fixed camera view</option>
+                          {cameraProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+                        </select>
+                      </label>
+                      <button type="button" className="secondary-button" onClick={applyCameraProfile} disabled={!selectedCameraProfileId}>
+                        Apply line
+                      </button>
+                      <button type="button" className="secondary-button" onClick={deleteCameraProfile} disabled={!selectedCameraProfileId}>
+                        Delete profile
+                      </button>
+                    </div>}
+                    {cameraProfileNotice && <p className="camera-profile-notice" role="status">{cameraProfileNotice}</p>}
+                    <p className="camera-profile-limit">Profiles stay in this browser. They store the line geometry only and apply only to videos with a matching aspect ratio. Confirm the overlay each time; this is not camera calibration and does not enable physical speed measurement.</p>
+                  </div>
                 </div>
               )}
               <p className="viewer-caption">Tracks are drawn from sampled detections. Box motion is interpolated between detector samples for smoother viewing; it does not add new detections.</p>

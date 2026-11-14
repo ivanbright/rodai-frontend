@@ -55,6 +55,12 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .count-line-mark text { fill: #081421; stroke: #fff7d6; font-size: 17px; font-weight: 800; paint-order: stroke; }
 .count-line-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
 .count-line-tools p { flex-basis: 100%; margin: 0; color: #64748b; font-size: 11px; line-height: 1.5; }
+.camera-profile-tools { display: grid; gap: 10px; flex-basis: 100%; margin-top: 4px; padding: 12px; border: 1px solid #dce6f2; border-radius: 9px; background: #f8fbff; }
+.camera-profile-save, .camera-profile-apply { display: flex; align-items: end; flex-wrap: wrap; gap: 8px; }
+.camera-profile-save label, .camera-profile-apply label { display: grid; flex: 1 1 220px; gap: 5px; color: #52657f; font-size: 11px; font-weight: 650; }
+.camera-profile-save input, .camera-profile-apply select { width: 100%; min-height: 36px; border: 1px solid #cfdae8; border-radius: 7px; padding: 7px 9px; background: white; color: #17345f; font: inherit; }
+.camera-profile-notice { color: #24569d !important; font-size: 11px !important; }
+.count-line-tools p.camera-profile-limit { border-top: 1px solid #e3eaf4; padding-top: 9px; color: #64748b; font-size: 10px; }
 .flow-summary { margin-top: 12px; padding: 15px; border: 1px solid #dce6f2; border-radius: 10px; background: #f8fbff; }
 .flow-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .flow-heading .eyebrow { margin-bottom: 5px; }
