@@ -197,6 +197,8 @@ export function App() {
           setSession(current);
         }
         if (['completed', 'failed', 'stopped'].includes(current.status)) {
+          releaseCamera();
+          setCameraTracks([]);
           fetch(apiUrl('/api/v1/sessions?limit=20'))
             .then((result) => result.json() as Promise<VideoSession[]>)
             .then((items) => setRecentSessions(items))
@@ -374,6 +376,8 @@ export function App() {
 
   function uploadVideo() {
     if (!video) return;
+    releaseCamera();
+    setCameraTracks([]);
     setSessionError(null);
     setUploadProgress(0);
     const xhr = new XMLHttpRequest();
@@ -531,9 +535,13 @@ export function App() {
   function releaseCamera() {
     if (cameraTimerRef.current !== null) window.clearInterval(cameraTimerRef.current);
     cameraTimerRef.current = null;
+    const socket = cameraSocketRef.current;
+    cameraSocketRef.current = null;
+    if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
     cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
     cameraStreamRef.current = null;
     cameraInFlightRef.current = false;
+    setCameraTracks([]);
     setCameraActive(false);
   }
 
@@ -826,6 +834,8 @@ export function App() {
       const response = await fetch(apiUrl(`/api/v1/sessions/${sessionId}`));
       if (!response.ok) throw new Error(`Session returned ${response.status}`);
       const savedSession = (await response.json()) as VideoSession;
+      releaseCamera();
+      setCameraTracks([]);
       setVideo(null);
       setCountingLine(null);
       setLineDraft(null);
