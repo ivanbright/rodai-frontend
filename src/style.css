@@ -139,6 +139,11 @@ dt { color: #64748b; } dd { margin: 0; font-weight: 650; text-align: right; }
 .viewer-caption { margin: 7px 2px 0; color: #64748b; font-size: 11px; line-height: 1.5; }
 .video-layout .status-panel { padding: 16px; }
 .video-layout .status-panel dl div { padding: 9px 0; }
+.upload-card { scroll-margin-top: 18px; }
+.upload-card:focus { outline: 3px solid #4b8df8; outline-offset: 3px; }
+.session-navigation { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: -2px 0 16px; padding-bottom: 12px; border-bottom: 1px solid #e8eef6; }
+.session-navigation > span { color: #64748b; font-size: 11px; line-height: 1.5; text-align: right; }
+.session-navigation button { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
 @media (min-width: 761px) and (max-height: 760px) {
   .video-stage { max-height: calc(100vh - 230px); }
 }
@@ -150,4 +155,6 @@ dt { color: #64748b; } dd { margin: 0; font-weight: 650; text-align: right; }
   .video-stage:fullscreen { max-height: none; }
   .fullscreen-button { top: 7px; right: 7px; min-height: 32px; padding: 7px 10px; }
   .tracking-readout { left: 7px; bottom: 7px; gap: 6px; max-width: calc(100% - 14px); font-size: 10px; }
+  .session-navigation { align-items: flex-start; flex-direction: column; }
+  .session-navigation > span { text-align: left; }
 }

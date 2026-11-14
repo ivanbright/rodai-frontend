@@ -68,6 +68,7 @@ export function App() {
   const [cameraQuality, setCameraQuality] = useState(0.82);
   const [analysisFps, setAnalysisFps] = useState(2);
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
+  const uploadCardRef = useRef<HTMLDivElement | null>(null);
   const cameraCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const cameraSocketRef = useRef<WebSocket | null>(null);
@@ -740,6 +741,13 @@ export function App() {
     }
   }
 
+  function returnToVideoWorkspace() {
+    const uploadCard = uploadCardRef.current;
+    if (!uploadCard) return;
+    uploadCard.focus({ preventScroll: true });
+    uploadCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
   const busy = session !== null && !['completed', 'failed', 'stopped'].includes(session.status);
 
   return (
@@ -761,7 +769,7 @@ export function App() {
             <span className="state-pill"><span className="state-dot" />{busy ? friendlyStatus(session.status) : 'Ready for video'}</span>
           </div>
           <section className="video-workspace" aria-label="Video upload and processing">
-            <div className="upload-card">
+            <div className="upload-card" id="video-workspace" ref={uploadCardRef} tabIndex={-1}>
               <label className="eyebrow" htmlFor="road-video">UPLOAD A ROAD VIDEO</label>
               <p className="upload-help">MP4, MOV, MKV, WebM, or AVI. The CPU analyzes selected frames; more samples take longer and can still miss fast events.</p>
               <div className="upload-controls">
@@ -889,6 +897,12 @@ export function App() {
 
             {session && (
               <div className="session-card" aria-live="polite">
+                <div className="session-navigation">
+                  <button type="button" className="secondary-button" onClick={returnToVideoWorkspace}>
+                    <span aria-hidden="true">←</span> Back to video workspace
+                  </button>
+                  <span>Your analysis stays available while you move around this page.</span>
+                </div>
                 <div className="session-heading">
                   <div>
                     <p className="eyebrow">VIDEO ANALYSIS</p>
