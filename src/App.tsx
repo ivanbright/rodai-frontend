@@ -27,6 +27,7 @@ type VideoSession = {
   created_at: string;
   uploaded_bytes: number;
   processed_frames: number;
+  analysis_fps?: number | null;
   metadata: VideoMetadata | null;
   error: string | null;
   result_url: string;
@@ -61,6 +62,7 @@ export function App() {
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraSize, setCameraSize] = useState(CAMERA_SIZES[2]);
   const [cameraQuality, setCameraQuality] = useState(0.82);
+  const [analysisFps, setAnalysisFps] = useState(2);
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
   const cameraCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
@@ -73,6 +75,8 @@ export function App() {
   const [cameraTracks, setCameraTracks] = useState<RoadTrack[]>([]);
   const [videoTracks, setVideoTracks] = useState<RoadTrack[]>([]);
   const [videoSummary, setVideoSummary] = useState<TrackingSummary | null>(null);
+  const [exportProgress, setExportProgress] = useState<number | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
   const detectionFramesRef = useRef<DetectionFrame[]>([]);
   const uploadedVideoRef = useRef<HTMLVideoElement | null>(null);
 
@@ -156,7 +160,8 @@ export function App() {
   }, [session?.id]);
 
   useEffect(() => {
-    if (!session || session.source_type === 'browser_camera' || !previewUrl || session.status !== 'completed') return;
+    if (!session || session.source_type === 'browser_camera' || !previewUrl
+      || !['completed', 'stopped'].includes(session.status) || session.processed_frames === 0) return;
     let active = true;
     fetch(session.result_url)
       .then(async (response) => {
@@ -181,7 +186,7 @@ export function App() {
         setVideoSummary({ trackIds: identities.size, peakInFrame, classes });
         updateVideoDetections();
       })
-      .catch(() => { if (active) setSessionError('Could not load detection overlays. Download the session results to inspect detections.'); });
+      .catch(() => { if (active) setSessionError('Analysis finished, but RodAI could not load the video overlay. Refresh this session to try again.'); });
     return () => { active = false; };
   }, [session?.id, session?.status, previewUrl]);
 
@@ -197,6 +202,8 @@ export function App() {
     setUploadProgress(0);
     setVideoSummary(null);
     setVideoTracks([]);
+    setExportError(null);
+    setExportProgress(null);
     setVideo(event.target.files?.[0] ?? null);
   }
 
@@ -205,7 +212,8 @@ export function App() {
     setSessionError(null);
     setUploadProgress(0);
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `/api/v1/sessions/video?filename=${encodeURIComponent(video.name)}`);
+    const query = new URLSearchParams({ filename: video.name, analysis_fps: String(analysisFps) });
+    xhr.open('POST', `/api/v1/sessions/video?${query.toString()}`);
     xhr.setRequestHeader('Content-Type', video.type || 'application/octet-stream');
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) {
@@ -374,7 +382,184 @@ export function App() {
       if (frame.timestamp_ms !== null && frame.timestamp_ms <= target) selected = frame;
       else if (frame.timestamp_ms !== null && frame.timestamp_ms > target) break;
     }
-    setVideoTracks(selected?.tracks ?? []);
+    const frameRate = session?.analysis_fps ?? session?.metadata?.fps ?? 30;
+    const maximumHoldMs = 1500 / frameRate;
+    setVideoTracks(
+      selected?.timestamp_ms !== null && selected?.timestamp_ms !== undefined
+        && target - selected.timestamp_ms <= maximumHoldMs
+        ? selected.tracks
+        : [],
+    );
+  }
+
+  async function exportAnnotatedVideo() {
+    const videoElement = uploadedVideoRef.current;
+    if (!videoElement || !session?.metadata || !previewUrl || exportProgress !== null) return;
+    const metadata = session.metadata;
+    if (typeof MediaRecorder === 'undefined' || typeof HTMLCanvasElement.prototype.captureStream !== 'function') {
+      setExportError('This browser cannot export an annotated video. You can still play the annotated preview here.');
+      return;
+    }
+
+    setExportError(null);
+    setExportProgress(0);
+    const width = videoElement.videoWidth || metadata.width;
+    const height = videoElement.videoHeight || metadata.height;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d');
+    if (!context) {
+      setExportError('The browser could not prepare the annotated video.');
+      setExportProgress(null);
+      return;
+    }
+
+    const mimeType = [
+      'video/webm;codecs=vp9,opus',
+      'video/webm;codecs=vp8,opus',
+      'video/webm',
+    ].find((candidate) => MediaRecorder.isTypeSupported(candidate));
+    if (!mimeType) {
+      setExportError('This browser does not support an export format for the annotated video.');
+      setExportProgress(null);
+      return;
+    }
+
+    const canvasStream = canvas.captureStream(metadata.fps || 30);
+    const videoWithCapture = videoElement as HTMLVideoElement & { captureStream?: () => MediaStream };
+    const sourceStream = videoWithCapture.captureStream?.() ?? null;
+    const stream = new MediaStream([
+      ...canvasStream.getVideoTracks(),
+      ...(sourceStream?.getAudioTracks() ?? []),
+    ]);
+    const recorder = new MediaRecorder(stream, { mimeType });
+    const chunks: Blob[] = [];
+    const originalTime = videoElement.currentTime;
+    const wasPlaying = !videoElement.paused;
+    const analyzedFrames = detectionFramesRef.current.filter((frame) => frame.timestamp_ms !== null);
+    const lastAnalyzedMs = analyzedFrames.reduce(
+      (latest, frame) => Math.max(latest, frame.timestamp_ms ?? 0),
+      0,
+    );
+    const exportEndSeconds = session.status === 'stopped'
+      ? lastAnalyzedMs / 1000
+      : videoElement.duration;
+    let selectedFrameIndex = 0;
+    let animationFrame = 0;
+    let failed = false;
+
+    const seekToStart = async () => {
+      if (videoElement.currentTime < 0.01) return;
+      await new Promise<void>((resolve) => {
+        const onSeeked = () => {
+          videoElement.removeEventListener('seeked', onSeeked);
+          resolve();
+        };
+        videoElement.addEventListener('seeked', onSeeked, { once: true });
+        videoElement.currentTime = 0;
+      });
+    };
+
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) chunks.push(event.data);
+    };
+    recorder.onerror = () => {
+      failed = true;
+      setExportError('The browser stopped recording the annotated video. Please try again.');
+      if (recorder.state !== 'inactive') recorder.stop();
+    };
+    recorder.onstop = () => {
+      cancelAnimationFrame(animationFrame);
+      stream.getTracks().forEach((track) => track.stop());
+      sourceStream?.getTracks().forEach((track) => track.stop());
+      if (!failed && chunks.length > 0) {
+        const output = new Blob(chunks, { type: mimeType });
+        const objectUrl = URL.createObjectURL(output);
+        const anchor = document.createElement('a');
+        const baseName = (session.filename || 'road-video').replace(/\.[^.]+$/, '').replace(/[^a-z0-9_-]+/gi, '-');
+        anchor.href = objectUrl;
+        anchor.download = `${baseName}-rodai-annotated.webm`;
+        anchor.click();
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+        setExportProgress(100);
+      }
+      videoElement.currentTime = originalTime;
+      if (wasPlaying) void videoElement.play().catch(() => undefined);
+      else videoElement.pause();
+      setExportProgress(null);
+    };
+
+    const drawFrame = () => {
+      if (videoElement.readyState >= 2) {
+        context.drawImage(videoElement, 0, 0, width, height);
+        const target = videoElement.currentTime * 1000;
+        while (
+          selectedFrameIndex + 1 < analyzedFrames.length
+          && (analyzedFrames[selectedFrameIndex + 1].timestamp_ms ?? Infinity) <= target
+        ) selectedFrameIndex += 1;
+        const selected = analyzedFrames[selectedFrameIndex];
+        const frameRate = session.analysis_fps ?? metadata.fps ?? 30;
+        const maximumHoldMs = 1500 / frameRate;
+        const tracks = selected?.timestamp_ms !== null && selected?.timestamp_ms !== undefined
+          && target - selected.timestamp_ms <= maximumHoldMs
+          ? selected.tracks
+          : [];
+        context.lineWidth = Math.max(2, width / 640 * 2);
+        context.font = `700 ${Math.max(13, width / 64)}px system-ui, sans-serif`;
+        for (const track of tracks) {
+          const [x1, y1, x2, y2] = track.bbox_xyxy;
+          if (track.trail_xy.length > 1) {
+            context.beginPath();
+            track.trail_xy.forEach(([x, y], index) => index === 0 ? context.moveTo(x, y) : context.lineTo(x, y));
+            context.strokeStyle = '#ffbd62';
+            context.stroke();
+          }
+          context.strokeStyle = '#49e0bc';
+          context.strokeRect(x1, y1, x2 - x1, y2 - y1);
+          const motion = track.speed_px_s === null ? '' : ` · ${track.speed_px_s.toFixed(0)} px/s`;
+          const label = `#${track.track_id} ${track.label}${motion}`;
+          const labelY = Math.max(22, y1 - 7);
+          const labelWidth = context.measureText(label).width + 12;
+          context.fillStyle = '#081421dc';
+          context.fillRect(x1, labelY - Math.max(16, width / 80), labelWidth, Math.max(20, width / 50));
+          context.fillStyle = '#eff8ff';
+          context.fillText(label, x1 + 6, labelY);
+        }
+        context.fillStyle = '#081421c9';
+        context.fillRect(0, height - 38, Math.min(width, 340), 38);
+        context.fillStyle = '#eff8ff';
+        context.font = `600 ${Math.max(12, width / 100)}px system-ui, sans-serif`;
+        context.fillText(`RODAI · EXPERIMENTAL TRACKING · ${(target / 1000).toFixed(1)}s`, 12, height - 14);
+        const duration = exportEndSeconds || videoElement.duration || 0;
+        setExportProgress(duration > 0 ? Math.min(99, Math.round(videoElement.currentTime / duration * 100)) : 0);
+      }
+      const reachedEnd = exportEndSeconds > 0 && videoElement.currentTime >= exportEndSeconds;
+      if (!videoElement.ended && !reachedEnd && recorder.state === 'recording') {
+        animationFrame = requestAnimationFrame(drawFrame);
+      } else if (recorder.state === 'recording') {
+        recorder.stop();
+      }
+    };
+
+    try {
+      await seekToStart();
+      if (exportEndSeconds === 0) throw new Error('No analyzed frames are available to export.');
+      updateVideoDetections();
+      recorder.start(500);
+      await videoElement.play();
+      animationFrame = requestAnimationFrame(drawFrame);
+      videoElement.addEventListener('ended', () => {
+        if (recorder.state === 'recording') recorder.stop();
+      }, { once: true });
+    } catch {
+      failed = true;
+      if (recorder.state !== 'inactive') recorder.stop();
+      setExportError('Could not start annotated video export. Try playing the preview, then export again.');
+      setExportProgress(null);
+      stream.getTracks().forEach((track) => track.stop());
+      sourceStream?.getTracks().forEach((track) => track.stop());
+    }
   }
 
   async function deleteSession() {
@@ -451,7 +636,7 @@ export function App() {
           <section className="video-workspace" aria-label="Video upload and processing">
             <div className="upload-card">
               <label className="eyebrow" htmlFor="road-video">UPLOAD A ROAD VIDEO</label>
-              <p className="upload-help">MP4, MOV, MKV, WebM, or AVI. Processing runs locally, frame by frame.</p>
+              <p className="upload-help">MP4, MOV, MKV, WebM, or AVI. The CPU analyzes selected frames; more samples take longer and can still miss fast events.</p>
               <div className="upload-controls">
                 <input
                   id="road-video"
@@ -461,13 +646,21 @@ export function App() {
                   disabled={busy}
                 />
                 <button type="button" onClick={uploadVideo} disabled={!video || busy}>
-                  {busy ? 'Processing…' : session?.status === 'completed' ? 'Process another video' : 'Process video'}
+                  {busy ? 'Processing…' : session && ['completed', 'stopped', 'failed'].includes(session.status) ? 'Process another video' : 'Process video'}
                 </button>
                 <button type="button" className="secondary-button" onClick={startCamera} disabled={busy || cameraActive}>
                   Start camera
                 </button>
               </div>
               <div className="camera-settings">
+                <label>Video analysis rate
+                  <select value={analysisFps} onChange={(event) => setAnalysisFps(Number(event.target.value))} disabled={busy}>
+                    <option value={1}>1 FPS · fastest</option>
+                    <option value={2}>2 FPS · balanced</option>
+                    <option value={5}>5 FPS · more detail</option>
+                    <option value={10}>10 FPS · slowest</option>
+                  </select>
+                </label>
                 <label>Camera maximum size
                   <select value={`${cameraSize.width}x${cameraSize.height}`} onChange={(event) => {
                     const selected = CAMERA_SIZES.find((size) => `${size.width}x${size.height}` === event.target.value);
@@ -494,7 +687,7 @@ export function App() {
             {previewUrl && (
               <div className="video-preview live-video">
                 <video ref={uploadedVideoRef} src={previewUrl} controls preload="metadata" onTimeUpdate={updateVideoDetections} aria-label="Selected road video preview with detection overlay" />
-                {session?.status === 'completed' && session.metadata && (
+                {session && ['completed', 'stopped'].includes(session.status) && session.processed_frames > 0 && session.metadata && (
                   <svg className="detection-overlay" viewBox={`0 0 ${session.metadata.width} ${session.metadata.height}`} aria-label="Detected road objects">
                     {videoTracks.map((track) => {
                       const [x1, y1, x2, y2] = track.bbox_xyxy;
@@ -507,7 +700,7 @@ export function App() {
                     })}
                   </svg>
                 )}
-                {session?.status === 'completed' && <div className="tracking-readout">
+                {session && ['completed', 'stopped'].includes(session.status) && session.processed_frames > 0 && <div className="tracking-readout">
                   <span>{videoTracks.length} tracked in this frame</span>
                   <span>Trail + ID · image-plane motion</span>
                 </div>}
@@ -538,15 +731,17 @@ export function App() {
               <div className="session-card" aria-live="polite">
                 <div className="session-heading">
                   <div>
-                    <p className="eyebrow">PROCESSING SESSION</p>
-                    <h2>{friendlyStatus(session.status)}</h2>
+                    <p className="eyebrow">VIDEO ANALYSIS</p>
+                    <h2>{session.status === 'stopped' && session.processed_frames === 0 ? 'No frames analyzed' : friendlyStatus(session.status)}</h2>
                   </div>
                   <span className={`session-state ${session.status}`}>{session.status}</span>
                 </div>
                 {session.status === 'uploading' && <p>Receiving {formatBytes(session.uploaded_bytes)}…</p>}
                 {session.status === 'queued' && <p>Upload complete. Preparing the video decoder…</p>}
                 {session.status === 'processing' && (
-                  <p>{session.source_type === 'browser_camera' ? 'Received' : 'Decoded'} {session.processed_frames.toLocaleString()} frames. Inference is not run yet.</p>
+                  <p>{session.processed_frames === 0
+                    ? 'Starting the vision model. First startup can take longer, especially if the model still needs to download. Keep this page open while RodAI prepares the analysis.'
+                    : `Analyzed ${session.processed_frames.toLocaleString()} frames${session.analysis_fps ? ` at ${session.analysis_fps} samples per second` : ''}. Detecting road users and building track trails…`}</p>
                 )}
                 {session.source_type === 'browser_camera' && session.dropped_frames !== undefined && (
                   <p>Live preview frames dropped: {session.dropped_frames.toLocaleString()}</p>
@@ -556,7 +751,12 @@ export function App() {
                 )}
                 {session.status === 'paused' && <p>Processing is paused at {session.processed_frames.toLocaleString()} frames.</p>}
                 {session.status === 'stopping' && <p>Stopping after the current frame…</p>}
-                {session.status === 'stopped' && <p>Session stopped after {session.processed_frames.toLocaleString()} frames. Partial results are available.</p>}
+                {session.status === 'stopped' && session.processed_frames === 0 && (
+                  <p className="no-results-message">RodAI stopped before it analyzed the first frame, so there is no video analysis or report to view. On first use the model must start before processing begins. Start the video again and wait until the frame count increases.</p>
+                )}
+                {session.status === 'stopped' && session.processed_frames > 0 && (
+                  <p>Stopped after analyzing {session.processed_frames.toLocaleString()} frames. The annotated preview and partial frame report cover the portion analyzed.</p>
+                )}
                 {session.status === 'failed' && <p className="error-message" role="alert">{session.error}</p>}
                 {session.source_type !== 'browser_camera' && videoSummary && (
                   <section className="tracking-summary" aria-label="Road user tracking summary">
@@ -570,14 +770,17 @@ export function App() {
                   <dl className="video-metadata">
                     <div><dt>Video size</dt><dd>{session.metadata.width} × {session.metadata.height}</dd></div>
                     <div><dt>Frame rate</dt><dd>{session.metadata.fps ? `${session.metadata.fps.toFixed(2)} FPS` : 'Unknown'}</dd></div>
-                    <div><dt>Frames processed</dt><dd>{session.processed_frames.toLocaleString()}</dd></div>
+                    <div><dt>{session.source_type === 'browser_camera' ? 'Frames received' : 'Frames analyzed'}</dt><dd>{session.processed_frames.toLocaleString()}</dd></div>
+                    {session.analysis_fps && <div><dt>Analysis sampling</dt><dd>{session.analysis_fps} FPS</dd></div>}
                     <div><dt>Duration</dt><dd>{session.metadata.duration_ms ? formatDuration(session.metadata.duration_ms) : 'Unknown'}</dd></div>
                   </dl>
                 )}
                 {session.status === 'processing' && (
                   <div className="session-actions">
                     <button className="secondary-button" type="button" onClick={() => controlSession('pause')}>Pause</button>
-                    <button className="secondary-button" type="button" onClick={() => controlSession('stop')}>Stop</button>
+                    <button className="secondary-button" type="button" onClick={() => controlSession('stop')}>
+                      {session.processed_frames === 0 ? 'Cancel startup' : 'Stop analysis'}
+                    </button>
                   </div>
                 )}
                 {session.status === 'paused' && (
@@ -593,11 +796,25 @@ export function App() {
                 )}
                 {['completed', 'failed', 'stopped'].includes(session.status) && (
                   <div className="session-actions">
-                    {['completed', 'stopped'].includes(session.status) && (
-                      <a className="download-link" href={session.result_url}>Download frame results (.jsonl)</a>
+                    {session.processed_frames > 0 && session.source_type !== 'browser_camera' && (
+                      <button type="button" onClick={exportAnnotatedVideo} disabled={exportProgress !== null}>
+                        {exportProgress === null ? 'Save annotated video (.webm)' : `Creating annotated video… ${exportProgress}%`}
+                      </button>
                     )}
                     <button className="secondary-button" type="button" onClick={deleteSession}>Delete session results</button>
                   </div>
+                )}
+                {exportError && <p className="error-message" role="alert">{exportError}</p>}
+                {exportProgress !== null && <div className="progress-line" role="status">
+                  <span>Rendering the annotated video in this browser</span><span>{exportProgress}%</span>
+                  <progress max="100" value={exportProgress} aria-label="Annotated video export progress" />
+                </div>}
+                {['completed', 'stopped'].includes(session.status) && session.processed_frames > 0 && session.source_type !== 'browser_camera' && (
+                  <details className="technical-results">
+                    <summary>Technical data for developers</summary>
+                    <p>JSONL is a machine-readable record with one line per analyzed video frame. It helps inspect detections and build integrations; you do not need it to watch the annotated video.</p>
+                    <a className="download-link" href={session.result_url}>Download frame data (.jsonl)</a>
+                  </details>
                 )}
               </div>
             )}
