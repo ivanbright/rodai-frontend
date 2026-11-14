@@ -50,11 +50,13 @@ type TrackingSummary = { trackIds: number; peakInFrame: number; classes: Record<
 const CAMERA_SIZES = [{ width: 640, height: 360 }, { width: 960, height: 540 }, { width: 1280, height: 720 }];
 
 export function App() {
-  const [activeWorkspace, setActiveWorkspace] = useState<'lab' | 'video'>('lab');
+  const [activeWorkspace, setActiveWorkspace] = useState<'lab' | 'video'>('video');
   const [health, setHealth] = useState<Health | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [video, setVideo] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [savedVideoUrl, setSavedVideoUrl] = useState<string | null>(null);
+  const videoSourceUrl = previewUrl ?? savedVideoUrl;
   const [session, setSession] = useState<VideoSession | null>(null);
   const [recentSessions, setRecentSessions] = useState<VideoSession[]>([]);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -99,7 +101,13 @@ export function App() {
         return (await response.json()) as VideoSession[];
       })
       .then((items) => {
-        if (active) setRecentSessions(items);
+        if (!active) return;
+        setRecentSessions(items);
+        const latestVideo = items.find((item) => item.source_type === 'video' && (
+          ['uploading', 'queued', 'processing', 'paused', 'stopping'].includes(item.status)
+          || (['completed', 'stopped'].includes(item.status) && item.processed_frames > 0)
+        ));
+        if (latestVideo) void openSession(latestVideo.id);
       })
       .catch(() => undefined);
     const healthTimer = window.setInterval(() => {
@@ -160,7 +168,7 @@ export function App() {
   }, [session?.id]);
 
   useEffect(() => {
-    if (!session || session.source_type === 'browser_camera' || !previewUrl
+    if (!session || session.source_type === 'browser_camera' || !videoSourceUrl
       || !['completed', 'stopped'].includes(session.status) || session.processed_frames === 0) return;
     let active = true;
     fetch(session.result_url)
@@ -188,7 +196,7 @@ export function App() {
       })
       .catch(() => { if (active) setSessionError('Analysis finished, but RodAI could not load the video overlay. Refresh this session to try again.'); });
     return () => { active = false; };
-  }, [session?.id, session?.status, previewUrl]);
+  }, [session?.id, session?.status, videoSourceUrl]);
 
   useEffect(() => () => {
     if (cameraTimerRef.current !== null) window.clearInterval(cameraTimerRef.current);
@@ -204,6 +212,7 @@ export function App() {
     setVideoTracks([]);
     setExportError(null);
     setExportProgress(null);
+    setSavedVideoUrl(null);
     setVideo(event.target.files?.[0] ?? null);
   }
 
@@ -394,7 +403,7 @@ export function App() {
 
   async function exportAnnotatedVideo() {
     const videoElement = uploadedVideoRef.current;
-    if (!videoElement || !session?.metadata || !previewUrl || exportProgress !== null) return;
+    if (!videoElement || !session?.metadata || !videoSourceUrl || exportProgress !== null) return;
     const metadata = session.metadata;
     if (typeof MediaRecorder === 'undefined' || typeof HTMLCanvasElement.prototype.captureStream !== 'function') {
       setExportError('This browser cannot export an annotated video. You can still play the annotated preview here.');
@@ -569,6 +578,7 @@ export function App() {
       if (!response.ok) throw new Error(`Delete returned ${response.status}`);
       setSession(null);
       setVideo(null);
+      setSavedVideoUrl(null);
       setVideoSummary(null);
       setVideoTracks([]);
       setRecentSessions((items) => items.filter((item) => item.id !== session.id));
@@ -606,8 +616,10 @@ export function App() {
     try {
       const response = await fetch(`/api/v1/sessions/${sessionId}`);
       if (!response.ok) throw new Error(`Session returned ${response.status}`);
+      const savedSession = (await response.json()) as VideoSession;
       setVideo(null);
-      setSession((await response.json()) as VideoSession);
+      setSavedVideoUrl(savedSession.source_type === 'video' ? `/api/v1/sessions/${sessionId}/video` : null);
+      setSession(savedSession);
     } catch {
       setSessionError('Could not open this saved session. Refresh the page and try again.');
     }
@@ -684,9 +696,9 @@ export function App() {
               )}
             </div>
 
-            {previewUrl && (
+            {videoSourceUrl && (
               <div className="video-preview live-video">
-                <video ref={uploadedVideoRef} src={previewUrl} controls preload="metadata" onTimeUpdate={updateVideoDetections} aria-label="Selected road video preview with detection overlay" />
+                <video ref={uploadedVideoRef} src={videoSourceUrl} controls preload="metadata" onTimeUpdate={updateVideoDetections} onError={() => setSessionError('The original upload is no longer available. It may have expired; upload the video again to review the overlay.')} aria-label="Road video preview with detection overlay" />
                 {session && ['completed', 'stopped'].includes(session.status) && session.processed_frames > 0 && session.metadata && (
                   <svg className="detection-overlay" viewBox={`0 0 ${session.metadata.width} ${session.metadata.height}`} aria-label="Detected road objects">
                     {videoTracks.map((track) => {
@@ -797,8 +809,8 @@ export function App() {
                 {['completed', 'failed', 'stopped'].includes(session.status) && (
                   <div className="session-actions">
                     {session.processed_frames > 0 && session.source_type !== 'browser_camera' && (
-                      <button type="button" onClick={exportAnnotatedVideo} disabled={exportProgress !== null}>
-                        {exportProgress === null ? 'Save annotated video (.webm)' : `Creating annotated video… ${exportProgress}%`}
+                      <button className="secondary-button" type="button" onClick={exportAnnotatedVideo} disabled={exportProgress !== null}>
+                        {exportProgress === null ? 'Export annotated video (.webm)' : `Creating export… ${exportProgress}%`}
                       </button>
                     )}
                     <button className="secondary-button" type="button" onClick={deleteSession}>Delete session results</button>
