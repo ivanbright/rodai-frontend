@@ -33,8 +33,18 @@ type VideoSession = {
   camera_settings?: { max_width: number; max_height: number; jpeg_quality: number } | null;
   dropped_frames?: number;
 };
-type Detection = { class_id: number; label: string; confidence: number; bbox_xyxy: [number, number, number, number] };
-type DetectionFrame = { timestamp_ms: number | null; detections: Detection[] };
+type RoadTrack = {
+  track_id: number;
+  label: string;
+  confidence: number;
+  bbox_xyxy: [number, number, number, number];
+  center_xy: [number, number];
+  velocity_px_s: [number, number];
+  speed_px_s: number | null;
+  trail_xy: [number, number][];
+};
+type DetectionFrame = { timestamp_ms: number | null; tracks: RoadTrack[] };
+type TrackingSummary = { trackIds: number; peakInFrame: number; classes: Record<string, number> };
 
 const CAMERA_SIZES = [{ width: 640, height: 360 }, { width: 960, height: 540 }, { width: 1280, height: 720 }];
 
@@ -60,8 +70,9 @@ export function App() {
   const cameraDroppedRef = useRef(0);
   const cameraInFlightRef = useRef(false);
   const cameraPausedRef = useRef(false);
-  const [cameraDetections, setCameraDetections] = useState<Detection[]>([]);
-  const [videoDetections, setVideoDetections] = useState<Detection[]>([]);
+  const [cameraTracks, setCameraTracks] = useState<RoadTrack[]>([]);
+  const [videoTracks, setVideoTracks] = useState<RoadTrack[]>([]);
+  const [videoSummary, setVideoSummary] = useState<TrackingSummary | null>(null);
   const detectionFramesRef = useRef<DetectionFrame[]>([]);
   const uploadedVideoRef = useRef<HTMLVideoElement | null>(null);
 
@@ -155,10 +166,19 @@ export function App() {
       .then((body) => {
         if (!active) return;
         detectionFramesRef.current = body.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line) as {
-          type: string; timestamp_ms?: number | null; detections?: Detection[];
+          type: string; timestamp_ms?: number | null; tracks?: RoadTrack[];
         }).filter((record) => record.type === 'frame').map((record) => ({
-          timestamp_ms: record.timestamp_ms ?? null, detections: record.detections ?? [],
+          timestamp_ms: record.timestamp_ms ?? null, tracks: record.tracks ?? [],
         }));
+        const identities = new Map<number, string>();
+        let peakInFrame = 0;
+        for (const frame of detectionFramesRef.current) {
+          peakInFrame = Math.max(peakInFrame, frame.tracks.length);
+          for (const track of frame.tracks) identities.set(track.track_id, track.label);
+        }
+        const classes: Record<string, number> = {};
+        for (const label of identities.values()) classes[label] = (classes[label] ?? 0) + 1;
+        setVideoSummary({ trackIds: identities.size, peakInFrame, classes });
         updateVideoDetections();
       })
       .catch(() => { if (active) setSessionError('Could not load detection overlays. Download the session results to inspect detections.'); });
@@ -175,6 +195,8 @@ export function App() {
     setSession(null);
     setSessionError(null);
     setUploadProgress(0);
+    setVideoSummary(null);
+    setVideoTracks([]);
     setVideo(event.target.files?.[0] ?? null);
   }
 
@@ -303,7 +325,7 @@ export function App() {
               duration_ms: Number(message.duration_ms ?? current.metadata?.duration_ms ?? 0),
             },
           } : current);
-          setCameraDetections(Array.isArray(message.detections) ? message.detections as Detection[] : []);
+          setCameraTracks(Array.isArray(message.tracks) ? message.tracks as RoadTrack[] : []);
         } else if (message.type === 'error') {
           cameraInFlightRef.current = false;
           setSessionError(`Camera frame rejected (${String(message.code)}).`);
@@ -315,7 +337,7 @@ export function App() {
             processed_frames: Number(message.processed_frames ?? current.processed_frames),
             dropped_frames: Number(message.dropped_frames ?? current.dropped_frames ?? 0),
           } : current);
-          setCameraDetections([]);
+          setCameraTracks([]);
           releaseCamera();
         }
       };
@@ -352,7 +374,7 @@ export function App() {
       if (frame.timestamp_ms !== null && frame.timestamp_ms <= target) selected = frame;
       else if (frame.timestamp_ms !== null && frame.timestamp_ms > target) break;
     }
-    setVideoDetections(selected?.detections ?? []);
+    setVideoTracks(selected?.tracks ?? []);
   }
 
   async function deleteSession() {
@@ -362,6 +384,8 @@ export function App() {
       if (!response.ok) throw new Error(`Delete returned ${response.status}`);
       setSession(null);
       setVideo(null);
+      setVideoSummary(null);
+      setVideoTracks([]);
       setRecentSessions((items) => items.filter((item) => item.id !== session.id));
       setUploadProgress(0);
       setSessionError(null);
@@ -472,15 +496,21 @@ export function App() {
                 <video ref={uploadedVideoRef} src={previewUrl} controls preload="metadata" onTimeUpdate={updateVideoDetections} aria-label="Selected road video preview with detection overlay" />
                 {session?.status === 'completed' && session.metadata && (
                   <svg className="detection-overlay" viewBox={`0 0 ${session.metadata.width} ${session.metadata.height}`} aria-label="Detected road objects">
-                    {videoDetections.map((detection, index) => {
-                      const [x1, y1, x2, y2] = detection.bbox_xyxy;
-                      return <g key={`${detection.class_id}-${index}`}>
+                    {videoTracks.map((track) => {
+                      const [x1, y1, x2, y2] = track.bbox_xyxy;
+                      const points = track.trail_xy.map(([x, y]) => `${x},${y}`).join(' ');
+                      return <g key={track.track_id}>
+                        {track.trail_xy.length > 1 && <polyline className="track-trail" points={points} />}
                         <rect x={x1} y={y1} width={x2 - x1} height={y2 - y1} />
-                        <text x={x1} y={Math.max(18, y1 - 5)}>{detection.label} {(detection.confidence * 100).toFixed(0)}%</text>
+                        <text x={x1} y={Math.max(18, y1 - 5)}>#{track.track_id} {track.label}{track.speed_px_s === null ? '' : ` · ${track.speed_px_s.toFixed(0)} px/s`}</text>
                       </g>;
                     })}
                   </svg>
                 )}
+                {session?.status === 'completed' && <div className="tracking-readout">
+                  <span>{videoTracks.length} tracked in this frame</span>
+                  <span>Trail + ID · image-plane motion</span>
+                </div>}
               </div>
             )}
 
@@ -489,11 +519,13 @@ export function App() {
                 <video ref={cameraVideoRef} autoPlay muted playsInline aria-label="Live browser camera preview" />
                 {session?.metadata && (
                   <svg className="detection-overlay" viewBox={`0 0 ${session.metadata.width} ${session.metadata.height}`} aria-label="Live object detections">
-                    {cameraDetections.map((detection, index) => {
-                      const [x1, y1, x2, y2] = detection.bbox_xyxy;
-                      return <g key={`${detection.class_id}-${index}`}>
+                    {cameraTracks.map((track) => {
+                      const [x1, y1, x2, y2] = track.bbox_xyxy;
+                      const points = track.trail_xy.map(([x, y]) => `${x},${y}`).join(' ');
+                      return <g key={track.track_id}>
+                        {track.trail_xy.length > 1 && <polyline className="track-trail" points={points} />}
                         <rect x={x1} y={y1} width={x2 - x1} height={y2 - y1} />
-                        <text x={x1} y={Math.max(18, y1 - 5)}>{detection.label} {(detection.confidence * 100).toFixed(0)}%</text>
+                        <text x={x1} y={Math.max(18, y1 - 5)}>#{track.track_id} {track.label}{track.speed_px_s === null ? '' : ` · ${track.speed_px_s.toFixed(0)} px/s`}</text>
                       </g>;
                     })}
                   </svg>
@@ -520,12 +552,20 @@ export function App() {
                   <p>Live preview frames dropped: {session.dropped_frames.toLocaleString()}</p>
                 )}
                 {session.source_type === 'browser_camera' && session.status === 'processing' && (
-                  <p>{cameraDetections.length} road objects in the latest frame</p>
+                  <p>{cameraTracks.length} tracked road users in the latest frame · movement is in pixels, not calibrated speed</p>
                 )}
                 {session.status === 'paused' && <p>Processing is paused at {session.processed_frames.toLocaleString()} frames.</p>}
                 {session.status === 'stopping' && <p>Stopping after the current frame…</p>}
                 {session.status === 'stopped' && <p>Session stopped after {session.processed_frames.toLocaleString()} frames. Partial results are available.</p>}
                 {session.status === 'failed' && <p className="error-message" role="alert">{session.error}</p>}
+                {session.source_type !== 'browser_camera' && videoSummary && (
+                  <section className="tracking-summary" aria-label="Road user tracking summary">
+                    <div><span>Track IDs</span><strong>{videoSummary.trackIds.toLocaleString()}</strong></div>
+                    <div><span>Peak in frame</span><strong>{videoSummary.peakInFrame.toLocaleString()}</strong></div>
+                    <div><span>Tracked classes</span><strong>{Object.entries(videoSummary.classes).map(([label, count]) => `${label} ${count}`).join(' · ') || 'None'}</strong></div>
+                    <p>Prototype image-plane tracking. IDs may switch or split; motion is not calibrated to metres or km/h.</p>
+                  </section>
+                )}
                 {session.metadata && (
                   <dl className="video-metadata">
                     <div><dt>Video size</dt><dd>{session.metadata.width} × {session.metadata.height}</dd></div>
