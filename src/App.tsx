@@ -1,4 +1,5 @@
 import { ChangeEvent, useEffect, useRef, useState } from 'react';
+import { SimulationLab } from './SimulationLab';
 
 type Health = {
   status: 'healthy' | 'degraded';
@@ -38,6 +39,7 @@ type DetectionFrame = { timestamp_ms: number | null; detections: Detection[] };
 const CAMERA_SIZES = [{ width: 640, height: 360 }, { width: 960, height: 540 }, { width: 1280, height: 720 }];
 
 export function App() {
+  const [activeWorkspace, setActiveWorkspace] = useState<'lab' | 'video'>('lab');
   const [health, setHealth] = useState<Health | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [video, setVideo] = useState<File | null>(null);
@@ -411,9 +413,12 @@ export function App() {
           <img className="brand-mark" src="/brand/rodai-mark.svg" alt="" />
           <span className="brand-wordmark">Rod<span>AI</span></span>
         </div>
-        <span className="phase-label">VIDEO PIPELINE</span>
+        <nav className="workspace-tabs" aria-label="RodAI workspaces">
+          <button type="button" className={activeWorkspace === 'lab' ? 'active' : ''} onClick={() => setActiveWorkspace('lab')}>Simulation lab</button>
+          <button type="button" className={activeWorkspace === 'video' ? 'active' : ''} onClick={() => setActiveWorkspace('video')}>Video analysis</button>
+        </nav>
       </header>
-      <section className="workspace" aria-labelledby="welcome-title">
+      {activeWorkspace === 'lab' ? <SimulationLab /> : <section className="workspace" aria-labelledby="welcome-title">
         <div className="scene">
           <div className="scene-header">
             <div><p className="eyebrow">PERCEPTION WORKSPACE</p><h1 id="welcome-title">Road scene</h1></div>
@@ -597,9 +602,9 @@ export function App() {
             <div><dt>Data volume</dt><dd>{health.volume.status}</dd></div>
             {health.volume.free_bytes !== undefined && <div><dt>Free space</dt><dd>{formatBytes(health.volume.free_bytes)}</dd></div>}
           </dl>}
-          <p className="panel-note">DETR detects common road users. Outputs are experimental and do not predict crashes or support safety decisions.</p>
+          <p className="panel-note">DETR detects common road users in video. It does not predict crashes or support safety decisions.</p>
         </aside>
-      </section>
+      </section>}
       <footer className="app-footer">
         <strong>RodAI</strong>
         <span>Local-first road perception laboratory</span>

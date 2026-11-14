@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { App } from './App';
 
 afterEach(() => {
@@ -33,6 +33,7 @@ describe('foundation viewer', () => {
       });
     }));
     render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /video analysis/i }));
     expect(await screen.findByLabelText(/upload a road video/i)).toBeTruthy();
     expect(screen.getByRole('heading', { name: /choose a video to begin/i })).toBeTruthy();
     expect(screen.getByText(/DETR detects common road users/i)).toBeTruthy();

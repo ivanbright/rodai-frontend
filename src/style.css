@@ -3,6 +3,9 @@
 body { margin: 0; min-width: 320px; min-height: 100vh; }
 .shell { width: min(1440px, 100%); margin: 0 auto; padding: 0 32px; }
 .topbar { height: 72px; border-bottom: 1px solid #dce6f2; display: flex; justify-content: space-between; align-items: center; }
+.workspace-tabs { display: flex; align-items: center; gap: 5px; padding: 4px; border: 1px solid #dce6f2; border-radius: 9px; background: #eef3f9; }
+.workspace-tabs button { min-height: 32px; border-radius: 6px; padding: 7px 12px; background: transparent; color: #60718a; font-size: 12px; }
+.workspace-tabs button.active { background: white; color: #17345f; box-shadow: 0 1px 4px #17345f1c; }
 .brand { display: inline-flex; align-items: center; gap: 10px; color: #102946; text-decoration: none; font-size: clamp(18px, 1.7vw, 22px); font-weight: 780; letter-spacing: -.055em; }
 .brand-mark { display: block; width: clamp(36px, 3.2vw, 44px); height: clamp(36px, 3.2vw, 44px); flex: 0 0 auto; }
 .brand-wordmark span { color: #188b99; }
