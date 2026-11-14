@@ -27,6 +27,7 @@ describe('foundation viewer', () => {
           database: { status: 'available', error_type: null },
           device: { configured: 'cpu', selected: 'cpu' },
           model: { status: 'unavailable', identifier: 'unavailable' },
+          retention: { status: 'available', failed_deletions: 0 },
           volume: { status: 'available', free_bytes: 1024 },
         }),
       });
@@ -34,6 +35,6 @@ describe('foundation viewer', () => {
     render(<App />);
     expect(await screen.findByLabelText(/upload a road video/i)).toBeTruthy();
     expect(screen.getByRole('heading', { name: /choose a video to begin/i })).toBeTruthy();
-    expect(screen.getByText(/detector is not configured yet/i)).toBeTruthy();
+    expect(screen.getByText(/DETR detects common road users/i)).toBeTruthy();
   });
 });

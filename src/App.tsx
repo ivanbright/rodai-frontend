@@ -6,6 +6,7 @@ type Health = {
   database: { status: string; error_type: string | null };
   device: { configured: string; selected: string };
   model: { status: string; identifier: string };
+  retention: { status: string; failed_deletions: number | null; error_type?: string };
   volume: { status: string; free_bytes?: number; error?: string };
 };
 
@@ -28,7 +29,13 @@ type VideoSession = {
   metadata: VideoMetadata | null;
   error: string | null;
   result_url: string;
+  camera_settings?: { max_width: number; max_height: number; jpeg_quality: number } | null;
+  dropped_frames?: number;
 };
+type Detection = { class_id: number; label: string; confidence: number; bbox_xyxy: [number, number, number, number] };
+type DetectionFrame = { timestamp_ms: number | null; detections: Detection[] };
+
+const CAMERA_SIZES = [{ width: 640, height: 360 }, { width: 960, height: 540 }, { width: 1280, height: 720 }];
 
 export function App() {
   const [health, setHealth] = useState<Health | null>(null);
@@ -40,6 +47,8 @@ export function App() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [cameraActive, setCameraActive] = useState(false);
+  const [cameraSize, setCameraSize] = useState(CAMERA_SIZES[2]);
+  const [cameraQuality, setCameraQuality] = useState(0.82);
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
   const cameraCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
@@ -49,6 +58,10 @@ export function App() {
   const cameraDroppedRef = useRef(0);
   const cameraInFlightRef = useRef(false);
   const cameraPausedRef = useRef(false);
+  const [cameraDetections, setCameraDetections] = useState<Detection[]>([]);
+  const [videoDetections, setVideoDetections] = useState<Detection[]>([]);
+  const detectionFramesRef = useRef<DetectionFrame[]>([]);
+  const uploadedVideoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -72,8 +85,15 @@ export function App() {
         if (active) setRecentSessions(items);
       })
       .catch(() => undefined);
+    const healthTimer = window.setInterval(() => {
+      fetch('/api/v1/health')
+        .then((response) => response.ok ? response.json() as Promise<Health> : null)
+        .then((data) => { if (active && data) setHealth(data); })
+        .catch(() => undefined);
+    }, 3000);
     return () => {
       active = false;
+      window.clearInterval(healthTimer);
     };
   }, []);
 
@@ -121,6 +141,27 @@ export function App() {
       window.clearInterval(timer);
     };
   }, [session?.id]);
+
+  useEffect(() => {
+    if (!session || session.source_type === 'browser_camera' || !previewUrl || session.status !== 'completed') return;
+    let active = true;
+    fetch(session.result_url)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Results returned ${response.status}`);
+        return response.text();
+      })
+      .then((body) => {
+        if (!active) return;
+        detectionFramesRef.current = body.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line) as {
+          type: string; timestamp_ms?: number | null; detections?: Detection[];
+        }).filter((record) => record.type === 'frame').map((record) => ({
+          timestamp_ms: record.timestamp_ms ?? null, detections: record.detections ?? [],
+        }));
+        updateVideoDetections();
+      })
+      .catch(() => { if (active) setSessionError('Could not load detection overlays. Download the session results to inspect detections.'); });
+    return () => { active = false; };
+  }, [session?.id, session?.status, previewUrl]);
 
   useEffect(() => () => {
     if (cameraTimerRef.current !== null) window.clearInterval(cameraTimerRef.current);
@@ -177,8 +218,13 @@ export function App() {
     }
     let stream: MediaStream | null = null;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-      const response = await fetch('/api/v1/sessions/live', { method: 'POST' });
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: cameraSize.width }, height: { ideal: cameraSize.height } }, audio: false,
+      });
+      const response = await fetch('/api/v1/sessions/live', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ max_width: cameraSize.width, max_height: cameraSize.height, jpeg_quality: cameraQuality }),
+      });
       const payload = await response.json() as VideoSession | { detail?: string };
       if (!response.ok) {
         throw new Error('detail' in payload ? payload.detail ?? 'Could not create camera session.' : 'Could not create camera session.');
@@ -208,8 +254,10 @@ export function App() {
           }
           const context = canvas.getContext('2d');
           if (!context || socket.readyState !== WebSocket.OPEN) return;
-          canvas.width = videoElement.videoWidth;
-          canvas.height = videoElement.videoHeight;
+          const settings = liveSession.camera_settings ?? { max_width: cameraSize.width, max_height: cameraSize.height, jpeg_quality: cameraQuality };
+          const scale = Math.min(1, settings.max_width / videoElement.videoWidth, settings.max_height / videoElement.videoHeight);
+          canvas.width = Math.max(1, Math.round(videoElement.videoWidth * scale));
+          canvas.height = Math.max(1, Math.round(videoElement.videoHeight * scale));
           context.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
           cameraInFlightRef.current = true;
           canvas.toBlob((blob) => {
@@ -226,7 +274,7 @@ export function App() {
             }));
             socket.send(blob);
             cameraDroppedRef.current = 0;
-          }, 'image/jpeg', 0.82);
+          }, 'image/jpeg', settings.jpeg_quality);
         }, 200);
       };
       socket.onmessage = (event) => {
@@ -244,6 +292,7 @@ export function App() {
             ...current,
             status: 'processing',
             processed_frames: Number(message.processed_frames ?? current.processed_frames),
+            dropped_frames: Number(message.dropped_frames ?? current.dropped_frames ?? 0),
             metadata: {
               width: Number(message.width ?? current.metadata?.width ?? 0),
               height: Number(message.height ?? current.metadata?.height ?? 0),
@@ -252,6 +301,7 @@ export function App() {
               duration_ms: Number(message.duration_ms ?? current.metadata?.duration_ms ?? 0),
             },
           } : current);
+          setCameraDetections(Array.isArray(message.detections) ? message.detections as Detection[] : []);
         } else if (message.type === 'error') {
           cameraInFlightRef.current = false;
           setSessionError(`Camera frame rejected (${String(message.code)}).`);
@@ -261,7 +311,9 @@ export function App() {
             ...current,
             status: message.status === 'failed' ? 'failed' : 'stopped',
             processed_frames: Number(message.processed_frames ?? current.processed_frames),
+            dropped_frames: Number(message.dropped_frames ?? current.dropped_frames ?? 0),
           } : current);
+          setCameraDetections([]);
           releaseCamera();
         }
       };
@@ -288,6 +340,17 @@ export function App() {
     cameraStreamRef.current = null;
     cameraInFlightRef.current = false;
     setCameraActive(false);
+  }
+
+  function updateVideoDetections() {
+    const target = (uploadedVideoRef.current?.currentTime ?? 0) * 1000;
+    const frames = detectionFramesRef.current;
+    let selected: DetectionFrame | undefined;
+    for (const frame of frames) {
+      if (frame.timestamp_ms !== null && frame.timestamp_ms <= target) selected = frame;
+      else if (frame.timestamp_ms !== null && frame.timestamp_ms > target) break;
+    }
+    setVideoDetections(selected?.detections ?? []);
   }
 
   async function deleteSession() {
@@ -317,7 +380,9 @@ export function App() {
       if (action === 'pause') cameraPausedRef.current = true;
       if (action === 'resume') cameraPausedRef.current = false;
       if (action === 'stop' && session.source_type === 'browser_camera' && cameraSocketRef.current?.readyState === WebSocket.OPEN) {
-        cameraSocketRef.current.send(JSON.stringify({ protocol: 'rodai.v1', type: 'stop' }));
+        cameraSocketRef.current.send(JSON.stringify({
+          protocol: 'rodai.v1', type: 'stop', dropped_since_last: cameraDroppedRef.current,
+        }));
       }
       setSession(payload as VideoSession);
     } catch (cause) {
@@ -373,6 +438,20 @@ export function App() {
                   Start camera
                 </button>
               </div>
+              <div className="camera-settings">
+                <label>Camera maximum size
+                  <select value={`${cameraSize.width}x${cameraSize.height}`} onChange={(event) => {
+                    const selected = CAMERA_SIZES.find((size) => `${size.width}x${size.height}` === event.target.value);
+                    if (selected) setCameraSize(selected);
+                  }} disabled={busy || cameraActive}>
+                    {CAMERA_SIZES.map((size) => <option key={size.width} value={`${size.width}x${size.height}`}>{size.width} Ã— {size.height}</option>)}
+                  </select>
+                </label>
+                <label>JPEG quality: {cameraQuality.toFixed(2)}
+                  <input type="range" min="0.5" max="0.95" step="0.05" value={cameraQuality}
+                    onChange={(event) => setCameraQuality(Number(event.target.value))} disabled={busy || cameraActive} />
+                </label>
+              </div>
               {video && <p className="selected-file">{video.name} · {formatBytes(video.size)}</p>}
               {sessionError && <p className="error-message" role="alert">{sessionError}</p>}
               {uploadProgress > 0 && uploadProgress < 100 && (
@@ -384,14 +463,36 @@ export function App() {
             </div>
 
             {previewUrl && (
-              <div className="video-preview">
-                <video src={previewUrl} controls preload="metadata" aria-label="Selected road video preview" />
+              <div className="video-preview live-video">
+                <video ref={uploadedVideoRef} src={previewUrl} controls preload="metadata" onTimeUpdate={updateVideoDetections} aria-label="Selected road video preview with detection overlay" />
+                {session?.status === 'completed' && session.metadata && (
+                  <svg className="detection-overlay" viewBox={`0 0 ${session.metadata.width} ${session.metadata.height}`} aria-label="Detected road objects">
+                    {videoDetections.map((detection, index) => {
+                      const [x1, y1, x2, y2] = detection.bbox_xyxy;
+                      return <g key={`${detection.class_id}-${index}`}>
+                        <rect x={x1} y={y1} width={x2 - x1} height={y2 - y1} />
+                        <text x={x1} y={Math.max(18, y1 - 5)}>{detection.label} {(detection.confidence * 100).toFixed(0)}%</text>
+                      </g>;
+                    })}
+                  </svg>
+                )}
               </div>
             )}
 
             {cameraActive && (
-              <div className="video-preview">
+              <div className="video-preview live-video">
                 <video ref={cameraVideoRef} autoPlay muted playsInline aria-label="Live browser camera preview" />
+                {session?.metadata && (
+                  <svg className="detection-overlay" viewBox={`0 0 ${session.metadata.width} ${session.metadata.height}`} aria-label="Live object detections">
+                    {cameraDetections.map((detection, index) => {
+                      const [x1, y1, x2, y2] = detection.bbox_xyxy;
+                      return <g key={`${detection.class_id}-${index}`}>
+                        <rect x={x1} y={y1} width={x2 - x1} height={y2 - y1} />
+                        <text x={x1} y={Math.max(18, y1 - 5)}>{detection.label} {(detection.confidence * 100).toFixed(0)}%</text>
+                      </g>;
+                    })}
+                  </svg>
+                )}
                 <canvas ref={cameraCanvasRef} hidden />
               </div>
             )}
@@ -409,6 +510,12 @@ export function App() {
                 {session.status === 'queued' && <p>Upload complete. Preparing the video decoder…</p>}
                 {session.status === 'processing' && (
                   <p>{session.source_type === 'browser_camera' ? 'Received' : 'Decoded'} {session.processed_frames.toLocaleString()} frames. Inference is not run yet.</p>
+                )}
+                {session.source_type === 'browser_camera' && session.dropped_frames !== undefined && (
+                  <p>Live preview frames dropped: {session.dropped_frames.toLocaleString()}</p>
+                )}
+                {session.source_type === 'browser_camera' && session.status === 'processing' && (
+                  <p>{cameraDetections.length} road objects in the latest frame</p>
                 )}
                 {session.status === 'paused' && <p>Processing is paused at {session.processed_frames.toLocaleString()} frames.</p>}
                 {session.status === 'stopping' && <p>Stopping after the current frame…</p>}
@@ -470,11 +577,11 @@ export function App() {
               <div className="scene-empty">
                 <div className="road-icon" aria-hidden="true"><span /></div>
                 <h2>Choose a video to begin</h2>
-                <p>RodAI validates the file, decodes every frame, and saves a frame-aligned session export. The detector is not configured yet.</p>
+                <p>RodAI runs the configured detector on every frame and saves frame-aligned results. Detection outputs can be wrong and are not safety advice.</p>
               </div>
             )}
           </section>
-          <footer className="scene-footer">Frame decoding only. No detections, tracks, physical speeds, or risk output are generated in this phase.</footer>
+          <footer className="scene-footer">Object detection is enabled in the Compose demo. Tracking, physical speed estimation and crash prediction are not implemented.</footer>
         </div>
         <aside className="status-panel" aria-label="System status">
           <h2>System status</h2>
@@ -486,10 +593,11 @@ export function App() {
             <div><dt>Database</dt><dd>{health.database.status}</dd></div>
             <div><dt>Processing device</dt><dd>{health.device.selected}</dd></div>
             <div><dt>Detector</dt><dd>{health.model.status}</dd></div>
+            <div><dt>Retention cleanup</dt><dd>{health.retention.status}{health.retention.failed_deletions ? ` · ${health.retention.failed_deletions} retry` : ''}</dd></div>
             <div><dt>Data volume</dt><dd>{health.volume.status}</dd></div>
             {health.volume.free_bytes !== undefined && <div><dt>Free space</dt><dd>{formatBytes(health.volume.free_bytes)}</dd></div>}
           </dl>}
-          <p className="panel-note">Session status comes from the backend. Detector inference arrives in Phase 3.</p>
+          <p className="panel-note">DETR detects common road users. Outputs are experimental and do not predict crashes or support safety decisions.</p>
         </aside>
       </section>
       <footer className="app-footer">
