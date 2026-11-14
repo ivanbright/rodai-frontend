@@ -13,4 +13,27 @@ describe('foundation viewer', () => {
     render(<App />);
     expect(await screen.findByText(/backend is not reachable/i)).toBeTruthy();
   });
+
+  it('offers an upload workspace without inventing detector output', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: string | URL | Request) => {
+      if (String(input).includes('/sessions?limit=20')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          status: 'healthy',
+          environment: 'local',
+          database: { status: 'available', error_type: null },
+          device: { configured: 'cpu', selected: 'cpu' },
+          model: { status: 'unavailable', identifier: 'unavailable' },
+          volume: { status: 'available', free_bytes: 1024 },
+        }),
+      });
+    }));
+    render(<App />);
+    expect(await screen.findByLabelText(/upload a road video/i)).toBeTruthy();
+    expect(screen.getByRole('heading', { name: /choose a video to begin/i })).toBeTruthy();
+    expect(screen.getByText(/detector is not configured yet/i)).toBeTruthy();
+  });
 });
