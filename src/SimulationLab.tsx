@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { apiUrl, apiWebSocketUrl } from './api';
 import scenarioLibrary from './scenarios/road-conflicts.v1.json';
 import './simulation.css';
 
@@ -96,15 +97,13 @@ export function SimulationLab() {
     setInferenceAvailable(null);
     setDetectorState('connecting');
     try {
-      const response = await fetch('/api/v1/sessions/live', {
+      const response = await fetch(apiUrl('/api/v1/sessions/live'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ max_width: 1000, max_height: 560, jpeg_quality: 0.75 }),
       });
       const session = await response.json() as { id?: string; detail?: string };
       if (!response.ok || !session.id) throw new Error(session.detail ?? `Could not start detector session (${response.status}).`);
-      const socketUrl = new URL(`/api/v1/sessions/ws/${session.id}`, window.location.href);
-      socketUrl.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const socket = new WebSocket(socketUrl);
+      const socket = new WebSocket(apiWebSocketUrl(`/api/v1/sessions/ws/${session.id}`));
       detectorSocketRef.current = socket;
       socket.onmessage = (event) => {
         if (typeof event.data !== 'string') return;
