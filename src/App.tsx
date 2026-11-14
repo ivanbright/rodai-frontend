@@ -81,6 +81,15 @@ export function App() {
   const [exportError, setExportError] = useState<string | null>(null);
   const detectionFramesRef = useRef<DetectionFrame[]>([]);
   const uploadedVideoRef = useRef<HTMLVideoElement | null>(null);
+  const videoStageRef = useRef<HTMLDivElement | null>(null);
+  const overlayAnimationRef = useRef<number | null>(null);
+  const [videoFullscreen, setVideoFullscreen] = useState(false);
+
+  useEffect(() => {
+    const updateFullscreen = () => setVideoFullscreen(document.fullscreenElement === videoStageRef.current);
+    document.addEventListener('fullscreenchange', updateFullscreen);
+    return () => document.removeEventListener('fullscreenchange', updateFullscreen);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -386,19 +395,58 @@ export function App() {
   function updateVideoDetections() {
     const target = (uploadedVideoRef.current?.currentTime ?? 0) * 1000;
     const frames = detectionFramesRef.current;
-    let selected: DetectionFrame | undefined;
+    let selectedIndex = -1;
     for (const frame of frames) {
-      if (frame.timestamp_ms !== null && frame.timestamp_ms <= target) selected = frame;
+      if (frame.timestamp_ms !== null && frame.timestamp_ms <= target) selectedIndex = frames.indexOf(frame);
       else if (frame.timestamp_ms !== null && frame.timestamp_ms > target) break;
     }
-    const frameRate = session?.analysis_fps ?? session?.metadata?.fps ?? 30;
-    const maximumHoldMs = 1500 / frameRate;
-    setVideoTracks(
-      selected?.timestamp_ms !== null && selected?.timestamp_ms !== undefined
-        && target - selected.timestamp_ms <= maximumHoldMs
-        ? selected.tracks
-        : [],
-    );
+    const selected = frames[selectedIndex];
+    const next = frames[selectedIndex + 1];
+    const frameRate = session?.analysis_fps ?? 2;
+    const maxGapMs = Math.max(1000 / frameRate * 1.6, 700);
+    if (!selected || selected.timestamp_ms === null || target - selected.timestamp_ms > maxGapMs) {
+      setVideoTracks([]);
+      return;
+    }
+    const canInterpolate = next?.timestamp_ms !== null && next?.timestamp_ms !== undefined
+      && next.timestamp_ms > selected.timestamp_ms && next.timestamp_ms - selected.timestamp_ms <= maxGapMs;
+    const progress = canInterpolate
+      ? Math.max(0, Math.min(1, (target - selected.timestamp_ms) / (next.timestamp_ms! - selected.timestamp_ms)))
+      : 0;
+    const nextTracks = new Map((canInterpolate ? next.tracks : []).map((track) => [track.track_id, track]));
+    const tracks = selected.tracks.map((track) => {
+      const following = nextTracks.get(track.track_id);
+      if (!following || progress === 0) return track;
+      const mix = (a: number, b: number) => a + (b - a) * progress;
+      return {
+        ...track,
+        bbox_xyxy: track.bbox_xyxy.map((value, index) => mix(value, following.bbox_xyxy[index])) as RoadTrack['bbox_xyxy'],
+        center_xy: track.center_xy.map((value, index) => mix(value, following.center_xy[index])) as RoadTrack['center_xy'],
+      };
+    });
+    setVideoTracks(tracks);
+  }
+
+  function animateVideoDetections() {
+    if (overlayAnimationRef.current !== null) window.cancelAnimationFrame(overlayAnimationRef.current);
+    const tick = () => {
+      updateVideoDetections();
+      if (uploadedVideoRef.current && !uploadedVideoRef.current.paused && !uploadedVideoRef.current.ended) {
+        overlayAnimationRef.current = window.requestAnimationFrame(tick);
+      } else overlayAnimationRef.current = null;
+    };
+    overlayAnimationRef.current = window.requestAnimationFrame(tick);
+  }
+
+  async function toggleVideoFullscreen() {
+    const stage = videoStageRef.current;
+    if (!stage) return;
+    try {
+      if (document.fullscreenElement === stage) await document.exitFullscreen();
+      else await stage.requestFullscreen();
+    } catch {
+      setSessionError('Fullscreen is unavailable in this browser.');
+    }
   }
 
   async function exportAnnotatedVideo() {
@@ -639,7 +687,7 @@ export function App() {
           <button type="button" className={activeWorkspace === 'video' ? 'active' : ''} onClick={() => setActiveWorkspace('video')}>Video analysis</button>
         </nav>
       </header>
-      {activeWorkspace === 'lab' ? <SimulationLab /> : <section className="workspace" aria-labelledby="welcome-title">
+      {activeWorkspace === 'lab' ? <SimulationLab /> : <section className="workspace video-layout" aria-labelledby="welcome-title">
         <div className="scene">
           <div className="scene-header">
             <div><p className="eyebrow">PERCEPTION WORKSPACE</p><h1 id="welcome-title">Road scene</h1></div>
@@ -697,8 +745,9 @@ export function App() {
             </div>
 
             {videoSourceUrl && (
-              <div className="video-preview live-video">
-                <video ref={uploadedVideoRef} src={videoSourceUrl} controls preload="metadata" onTimeUpdate={updateVideoDetections} onError={() => setSessionError('The original upload is no longer available. It may have expired; upload the video again to review the overlay.')} aria-label="Road video preview with detection overlay" />
+              <div className="video-viewer">
+              <div className="video-preview live-video video-stage" ref={videoStageRef} style={{ aspectRatio: session?.metadata ? `${session.metadata.width} / ${session.metadata.height}` : '16 / 9' }}>
+                <video ref={uploadedVideoRef} src={videoSourceUrl} controls controlsList="nofullscreen" preload="metadata" onTimeUpdate={updateVideoDetections} onPlay={animateVideoDetections} onPause={updateVideoDetections} onSeeked={updateVideoDetections} onError={() => setSessionError('The original upload is no longer available. It may have expired; upload the video again to review the overlay.')} aria-label="Road video preview with detection overlay" />
                 {session && ['completed', 'stopped'].includes(session.status) && session.processed_frames > 0 && session.metadata && (
                   <svg className="detection-overlay" viewBox={`0 0 ${session.metadata.width} ${session.metadata.height}`} aria-label="Detected road objects">
                     {videoTracks.map((track) => {
@@ -712,10 +761,13 @@ export function App() {
                     })}
                   </svg>
                 )}
+                <button type="button" className="fullscreen-button" onClick={toggleVideoFullscreen} aria-label={videoFullscreen ? 'Exit fullscreen video' : 'View video fullscreen'}>{videoFullscreen ? 'Exit fullscreen' : '⛶ Fullscreen'}</button>
                 {session && ['completed', 'stopped'].includes(session.status) && session.processed_frames > 0 && <div className="tracking-readout">
                   <span>{videoTracks.length} tracked in this frame</span>
-                  <span>Trail + ID · image-plane motion</span>
+                  <span>{session.analysis_fps ?? 2} analyzed FPS · boxes interpolate between samples</span>
                 </div>}
+              </div>
+              <p className="viewer-caption">Tracks are drawn from sampled detections. Box motion is interpolated between detector samples for smoother viewing; it does not add new detections.</p>
               </div>
             )}
 
