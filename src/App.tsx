@@ -1044,7 +1044,7 @@ export function App() {
                   <span className={`session-state ${session.status}`}>{session.status}</span>
                 </div>
                 {session.status === 'uploading' && <p>Receiving {formatBytes(session.uploaded_bytes)}…</p>}
-                {session.status === 'queued' && <p>Upload complete. Preparing the video decoder…</p>}
+                {session.status === 'queued' && <p>{session.error ?? 'Upload complete. Preparing the video decoder…'}</p>}
                 {session.status === 'processing' && (
                   <p>{session.processed_frames === 0
                     ? 'Starting the vision model. First startup can take longer, especially if the model still needs to download. Keep this page open while RodAI prepares the analysis.'
