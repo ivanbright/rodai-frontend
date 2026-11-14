@@ -1,0 +1,56 @@
+{
+  "schema_version": "rodai.scenario-library.v1",
+  "library_version": "1.0.0",
+  "dataset_kind": "synthetic_ground_truth",
+  "coordinate_system": "scene-pixels",
+  "scene_size": { "width": 1000, "height": 560 },
+  "simulation_tick_hz": 10,
+  "cases": [
+    {
+      "id": "rear-end",
+      "title": "Sudden braking",
+      "event_type": "REAR-END CONFLICT",
+      "road_layout": "straight_road",
+      "description": "A following car closes too quickly on traffic that has slowed ahead.",
+      "initial_ttc_seconds": 5.2,
+      "conflict_point": { "x": 430, "y": 300 },
+      "expected_with_response": "conflict_avoided",
+      "expected_without_response": "collision",
+      "actors": [
+        { "id": "V-12", "label": "Car · V-12", "kind": "car", "role": "following_vehicle", "x": 250, "y": 300, "dx": 27, "dy": 0, "color": "#51d9c4" },
+        { "id": "V-08", "label": "Car · V-08", "kind": "car", "role": "slowing_vehicle", "x": 429, "y": 300, "dx": 8, "dy": 0, "color": "#f9b66c" },
+        { "id": "V-21", "label": "Bus · V-21", "kind": "bus", "role": "traffic", "x": 760, "y": 300, "dx": 8, "dy": 0, "color": "#8aafff" }
+      ]
+    },
+    {
+      "id": "pedestrian",
+      "title": "Pedestrian crossing",
+      "event_type": "VULNERABLE ROAD USER",
+      "road_layout": "marked_crossing",
+      "description": "A pedestrian enters a marked crossing as a vehicle approaches.",
+      "initial_ttc_seconds": 4.5,
+      "conflict_point": { "x": 564, "y": 315 },
+      "expected_with_response": "conflict_avoided",
+      "expected_without_response": "collision",
+      "actors": [
+        { "id": "V-04", "label": "Car · V-04", "kind": "car", "role": "approaching_vehicle", "x": 340, "y": 340, "dx": 50, "dy": 0, "color": "#51d9c4" },
+        { "id": "P-02", "label": "Person · P-02", "kind": "pedestrian", "role": "crossing_pedestrian", "x": 564, "y": 150, "dx": 0, "dy": 37, "color": "#ffdc7b" }
+      ]
+    },
+    {
+      "id": "intersection",
+      "title": "Blind intersection",
+      "event_type": "CROSSING PATHS",
+      "road_layout": "four_way_intersection",
+      "description": "Two vehicles approach the same junction from different directions.",
+      "initial_ttc_seconds": 3.9,
+      "conflict_point": { "x": 530, "y": 324 },
+      "expected_with_response": "conflict_avoided",
+      "expected_without_response": "collision",
+      "actors": [
+        { "id": "V-17", "label": "Car · V-17", "kind": "car", "role": "eastbound_vehicle", "x": 335, "y": 300, "dx": 50, "dy": 0, "color": "#51d9c4" },
+        { "id": "V-09", "label": "Car · V-09", "kind": "car", "role": "southbound_vehicle", "x": 530, "y": 168, "dx": 0, "dy": 40, "color": "#f9b66c" }
+      ]
+    }
+  ]
+}
