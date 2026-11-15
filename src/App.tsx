@@ -43,6 +43,49 @@ type VideoSession = {
   result_url: string;
   camera_settings?: { max_width: number; max_height: number; jpeg_quality: number } | null;
   dropped_frames?: number;
+  benchmark?: {
+    dataset_id: string;
+    dataset_name: string;
+    clip_id: string;
+    title: string;
+    source_url: string;
+    license_name: string;
+    permitted_uses: string;
+    privacy_reviewed: boolean;
+    event_type: string;
+    event_time_seconds: number | null;
+    annotation_reference: string | null;
+    split: string | null;
+  } | null;
+};
+type BenchmarkClip = {
+  id: string;
+  title: string;
+  file: string;
+  rights_reviewed: boolean;
+  source_url: string;
+  license_name: string;
+  permitted_uses: string;
+  privacy_reviewed: boolean;
+  event_type: string;
+  event_time_seconds: number | null;
+  annotation_reference: string | null;
+  split: string | null;
+  file_available: boolean;
+  can_analyze: boolean;
+  size_bytes: number | null;
+  video_url: string | null;
+};
+type BenchmarkDataset = {
+  id: string;
+  name: string;
+  camera_view: string;
+  source_url: string;
+  terms_url: string;
+  license_name: string;
+  purpose: string;
+  limitation: string;
+  clips: BenchmarkClip[];
 };
 type RoadTrack = {
   track_id: number;
@@ -76,6 +119,9 @@ export function App() {
   const videoSourceUrl = previewUrl ?? savedVideoUrl;
   const [session, setSession] = useState<VideoSession | null>(null);
   const [recentSessions, setRecentSessions] = useState<VideoSession[]>([]);
+  const [benchmarkDatasets, setBenchmarkDatasets] = useState<BenchmarkDataset[]>([]);
+  const [benchmarkLibraryEnabled, setBenchmarkLibraryEnabled] = useState(false);
+  const [benchmarkStarting, setBenchmarkStarting] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [cameraActive, setCameraActive] = useState(false);
@@ -144,11 +190,26 @@ export function App() {
       .then((items) => {
         if (!active) return;
         setRecentSessions(items);
-        const latestVideo = items.find((item) => item.source_type === 'video' && (
+        const latestVideo = items.find((item) => ['video', 'benchmark_video'].includes(item.source_type) && (
           ['uploading', 'queued', 'processing', 'paused', 'stopping'].includes(item.status)
           || (['completed', 'stopped'].includes(item.status) && item.processed_frames > 0)
         ));
         if (latestVideo) void openSession(latestVideo.id);
+      })
+      .catch(() => undefined);
+    fetch(apiUrl('/api/v1/benchmarks'))
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Benchmark library returned ${response.status}`);
+        return (await response.json()) as {
+          enabled: boolean;
+          datasets: BenchmarkDataset[];
+        };
+      })
+      .then((library) => {
+        if (!active) return;
+        if (typeof library.enabled !== 'boolean' || !Array.isArray(library.datasets)) return;
+        setBenchmarkLibraryEnabled(library.enabled);
+        setBenchmarkDatasets(library.datasets);
       })
       .catch(() => undefined);
     const healthTimer = window.setInterval(() => {
@@ -409,6 +470,46 @@ export function App() {
         .catch(() => undefined);
     };
     xhr.send(video);
+  }
+
+  async function analyzeBenchmarkClip(dataset: BenchmarkDataset, clip: BenchmarkClip) {
+    if (!clip.can_analyze || busy) return;
+    releaseCamera();
+    setSession(null);
+    setSessionError(null);
+    setUploadProgress(0);
+    setVideoSummary(null);
+    setVideoTracks([]);
+    setCameraTracks([]);
+    detectionFramesRef.current = [];
+    setCountingLine(null);
+    setLineDraft(null);
+    setSettingCountingLine(false);
+    setExportError(null);
+    setExportProgress(null);
+    setSavedVideoUrl(apiUrl(clip.video_url ?? ''));
+    setVideo(null);
+    setBenchmarkStarting(true);
+    try {
+      const query = new URLSearchParams({ analysis_fps: String(analysisFps) });
+      const response = await fetch(apiUrl(
+        `/api/v1/benchmarks/${encodeURIComponent(dataset.id)}/clips/${encodeURIComponent(clip.id)}/analyze?${query}`,
+      ), { method: 'POST' });
+      const payload = await response.json() as VideoSession | { detail?: string };
+      if (!response.ok) {
+        throw new Error('detail' in payload ? payload.detail ?? 'Benchmark analysis could not start.' : 'Benchmark analysis could not start.');
+      }
+      setSession(payload as VideoSession);
+      fetch(apiUrl('/api/v1/sessions?limit=20'))
+        .then((result) => result.ok ? result.json() as Promise<VideoSession[]> : null)
+        .then((items) => { if (items) setRecentSessions(items); })
+        .catch(() => undefined);
+    } catch (cause) {
+      setSavedVideoUrl(null);
+      setSessionError(cause instanceof Error ? cause.message : 'Benchmark analysis could not start.');
+    } finally {
+      setBenchmarkStarting(false);
+    }
   }
 
   async function startCamera() {
@@ -840,7 +941,13 @@ export function App() {
       setCountingLine(null);
       setLineDraft(null);
       setSettingCountingLine(false);
-      setSavedVideoUrl(savedSession.source_type === 'video' ? apiUrl(`/api/v1/sessions/${sessionId}/video`) : null);
+      setSavedVideoUrl(
+        savedSession.source_type === 'video'
+          ? apiUrl(`/api/v1/sessions/${sessionId}/video`)
+          : savedSession.source_type === 'benchmark_video' && savedSession.benchmark
+            ? apiUrl(`/api/v1/benchmarks/${encodeURIComponent(savedSession.benchmark.dataset_id)}/clips/${encodeURIComponent(savedSession.benchmark.clip_id)}/video`)
+            : null,
+      );
       setSession(savedSession);
     } catch {
       setSessionError('Could not open this saved session. Refresh the page and try again.');
@@ -854,7 +961,7 @@ export function App() {
     uploadCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
-  const busy = session !== null && !['completed', 'failed', 'stopped'].includes(session.status);
+  const busy = benchmarkStarting || (session !== null && !['completed', 'failed', 'stopped'].includes(session.status));
 
   return (
     <main className="shell">
@@ -921,6 +1028,48 @@ export function App() {
               )}
             </div>
 
+            {benchmarkLibraryEnabled && <section className="benchmark-library" aria-labelledby="benchmark-library-title">
+              <div className="benchmark-library-heading">
+                <div>
+                  <p className="eyebrow">LOCAL RESEARCH INPUTS</p>
+                  <h2 id="benchmark-library-title">Benchmark library</h2>
+                </div>
+                <span>Local only</span>
+              </div>
+              <p className="benchmark-library-intro">Use real benchmark clips after reviewing their terms. Files stay in your local <code>datasets/</code> folder and the API mounts them read-only.</p>
+              {benchmarkDatasets.map((dataset) => (
+                <article className="benchmark-dataset" key={dataset.id}>
+                  <div className="benchmark-dataset-heading">
+                    <div><h3>{dataset.name}</h3><span>{dataset.camera_view}</span></div>
+                    <span className="benchmark-clip-count">{dataset.clips.length} local {dataset.clips.length === 1 ? 'clip' : 'clips'}</span>
+                  </div>
+                  <p>{dataset.purpose}</p>
+                  <p className="benchmark-limit">{dataset.limitation}</p>
+                  <div className="benchmark-links">
+                    <a href={dataset.source_url} target="_blank" rel="noreferrer">Official source</a>
+                    <a href={dataset.terms_url} target="_blank" rel="noreferrer">Usage terms</a>
+                    <span>{dataset.license_name}</span>
+                  </div>
+                  {dataset.clips.length === 0 ? (
+                    <p className="benchmark-empty">No clips registered. Review the source and terms, then add permitted files and their labels to <code>datasets/catalog.json</code>.</p>
+                  ) : <ul className="benchmark-clips">
+                    {dataset.clips.map((clip) => (
+                      <li key={clip.id}>
+                        <div>
+                          <strong>{clip.title}</strong>
+                          <span>{clip.event_type.replaceAll('_', ' ')}{clip.event_time_seconds === null ? '' : ` · reference at ${clip.event_time_seconds.toFixed(1)} s`}</span>
+                          <small>{!clip.rights_reviewed ? 'Usage terms not reviewed' : !clip.file_available ? 'Local video file missing' : `${clip.license_name} · ${clip.permitted_uses}${clip.privacy_reviewed ? ' · Privacy reviewed' : ' · Privacy review pending'}${clip.size_bytes ? ` · ${formatBytes(clip.size_bytes)}` : ''}`}</small>
+                        </div>
+                        <button type="button" onClick={() => void analyzeBenchmarkClip(dataset, clip)} disabled={!clip.can_analyze || busy}>
+                          {clip.can_analyze ? 'Analyze clip' : 'Unavailable'}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>}
+                </article>
+              ))}
+              {benchmarkDatasets.length === 0 && <p className="benchmark-empty">The catalog has no dataset entries yet. Add sources to <code>datasets/catalog.json</code>.</p>}
+            </section>}
             {videoSourceUrl && (
               <div className="video-viewer">
               <div className="video-preview live-video video-stage" ref={videoStageRef} style={{ aspectRatio: session?.metadata ? `${session.metadata.width} / ${session.metadata.height}` : '16 / 9' }}>
@@ -1053,6 +1202,19 @@ export function App() {
                   </div>
                   <span className={`session-state ${session.status}`}>{session.status}</span>
                 </div>
+                {session.benchmark && <section className="benchmark-reference" aria-label="Dataset reference annotation">
+                  <div><p className="eyebrow">DATASET REFERENCE · NOT A MODEL PREDICTION</p><strong>{session.benchmark.event_type.replaceAll('_', ' ')}</strong></div>
+                  {session.benchmark.event_time_seconds !== null && <div className="benchmark-reference-time">
+                    <span>Reference event</span>
+                    <button type="button" className="secondary-button" onClick={() => {
+                      const player = uploadedVideoRef.current;
+                      if (!player || session.benchmark?.event_time_seconds === null || session.benchmark?.event_time_seconds === undefined) return;
+                      player.currentTime = session.benchmark.event_time_seconds;
+                      void player.play().catch(() => undefined);
+                    }}>Jump to {session.benchmark.event_time_seconds.toFixed(1)} s</button>
+                  </div>}
+                  <p>{session.benchmark.dataset_name} · {session.benchmark.license_name}{session.benchmark.annotation_reference ? ` · ${session.benchmark.annotation_reference}` : ''}</p>
+                </section>}
                 {session.status === 'uploading' && <p>Receiving {formatBytes(session.uploaded_bytes)}…</p>}
                 {session.status === 'queued' && <p>{session.error ?? 'Upload complete. Preparing the video decoder…'}</p>}
                 {session.status === 'processing' && (
