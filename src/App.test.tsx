@@ -7,14 +7,14 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('foundation viewer', () => {
+describe('road video workspace', () => {
   it('shows backend failure without inventing system state', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
     render(<App />);
     expect(await screen.findByText(/backend is not reachable/i)).toBeTruthy();
   });
 
-  it('offers an upload workspace without inventing detector output', async () => {
+  it('offers a camera-first workspace without inventing detector output', async () => {
     vi.stubGlobal('fetch', vi.fn((input: string | URL | Request) => {
       if (String(input).includes('/sessions?limit=20')) {
         return Promise.resolve({ ok: true, json: async () => [] });
@@ -33,10 +33,11 @@ describe('foundation viewer', () => {
       });
     }));
     render(<App />);
-    expect(await screen.findByLabelText(/upload a road video/i)).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: /video analysis workspace/i })).toBeTruthy();
     expect(screen.queryByText(/simulation lab/i)).toBeNull();
-    expect(screen.getByText(/Red cues show track pairs/i)).toBeTruthy();
-    expect(screen.getByRole('heading', { name: /choose a video to begin/i })).toBeTruthy();
-    expect(screen.getByText(/does not predict or prevent crashes/i)).toBeTruthy();
+    expect(screen.getByRole('heading', { name: /choose a road video/i })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: /your road footage appears here/i })).toBeTruthy();
+    expect(screen.queryByText(/trajectory review/i)).toBeNull();
+    expect(screen.getByText(/do not predict or prevent crashes/i)).toBeTruthy();
   });
 });

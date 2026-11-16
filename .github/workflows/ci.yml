@@ -4,7 +4,6 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -15,24 +14,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
-    name: Lint, test and build
+  frontend:
+    name: Frontend lint, tests and build
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v7.1.0
         with:
-          node-version: '22.13.1'
+          node-version: '22.x'
           cache: npm
       - name: Install locked dependencies
         run: npm ci
-      - name: Lint
+      - name: Lint frontend
         run: npm run lint
-      - name: Test
+      - name: Test frontend
         run: npm test
-      - name: Build production assets
+      - name: Build frontend
         run: npm run build

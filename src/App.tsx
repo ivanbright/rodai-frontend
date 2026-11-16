@@ -9,7 +9,13 @@ import {
   type CameraMeasurementProfile,
 } from './cameraProfiles';
 import { countLineCrossings, type CountingLine, type ImagePoint } from './movement';
-import { findPotentialConflicts } from './conflicts';
+import {
+  riskCuePairKey,
+  summarizeRiskCueEvents,
+  type DetectionFrame,
+  type RiskCue,
+  type RoadTrack,
+} from './riskCues';
 
 type Health = {
   status: 'healthy' | 'degraded';
@@ -50,6 +56,7 @@ type VideoSession = {
     title: string;
     source_url: string;
     license_name: string;
+    creator_attribution?: string | null;
     permitted_uses: string;
     privacy_reviewed: boolean;
     event_type: string;
@@ -66,6 +73,7 @@ type BenchmarkClip = {
   source_url: string;
   license_name: string;
   permitted_uses: string;
+  creator_attribution?: string | null;
   privacy_reviewed: boolean;
   event_type: string;
   event_time_seconds: number | null;
@@ -87,18 +95,8 @@ type BenchmarkDataset = {
   limitation: string;
   clips: BenchmarkClip[];
 };
-type RoadTrack = {
-  track_id: number;
-  label: string;
-  confidence: number;
-  bbox_xyxy: [number, number, number, number];
-  center_xy: [number, number];
-  velocity_px_s: [number, number];
-  speed_px_s: number | null;
-  trail_xy: [number, number][];
-};
-type DetectionFrame = { timestamp_ms: number | null; tracks: RoadTrack[] };
 type TrackingSummary = { trackIds: number; peakInFrame: number; classes: Record<string, number> };
+type DemoOption = { dataset: BenchmarkDataset; clip: BenchmarkClip };
 
 const CAMERA_SIZES = [{ width: 640, height: 360 }, { width: 960, height: 540 }, { width: 1280, height: 720 }];
 
@@ -108,6 +106,11 @@ function readCameraProfiles(): CameraMeasurementProfile[] {
   } catch {
     return [];
   }
+}
+
+function formatCueTime(timestampMs: number | null): string {
+  if (timestampMs === null || !Number.isFinite(timestampMs)) return 'time unavailable';
+  return `${(timestampMs / 1000).toFixed(1)} s`;
 }
 
 export function App() {
@@ -122,6 +125,7 @@ export function App() {
   const [benchmarkDatasets, setBenchmarkDatasets] = useState<BenchmarkDataset[]>([]);
   const [benchmarkLibraryEnabled, setBenchmarkLibraryEnabled] = useState(false);
   const [benchmarkStarting, setBenchmarkStarting] = useState(false);
+  const [selectedDemoKey, setSelectedDemoKey] = useState('');
   const [uploadProgress, setUploadProgress] = useState(0);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [cameraActive, setCameraActive] = useState(false);
@@ -140,8 +144,12 @@ export function App() {
   const cameraPausedRef = useRef(false);
   const [cameraTracks, setCameraTracks] = useState<RoadTrack[]>([]);
   const [videoTracks, setVideoTracks] = useState<RoadTrack[]>([]);
-  const videoConflicts = useMemo(() => findPotentialConflicts(videoTracks), [videoTracks]);
-  const cameraConflicts = useMemo(() => findPotentialConflicts(cameraTracks), [cameraTracks]);
+  const [cameraRiskCues, setCameraRiskCues] = useState<RiskCue[]>([]);
+  const cameraCueHistoryRef = useRef(new Map<string, { count: number; timestampMs: number }>());
+  const [videoRiskCues, setVideoRiskCues] = useState<RiskCue[]>([]);
+  const demoOptions = useMemo<DemoOption[]>(() => benchmarkDatasets.flatMap((dataset) =>
+    dataset.clips.filter((clip) => clip.can_analyze).map((clip) => ({ dataset, clip }))), [benchmarkDatasets]);
+  const selectedDemo = demoOptions.find(({ dataset, clip }) => `${dataset.id}/${clip.id}` === selectedDemoKey) ?? demoOptions[0];
   const [videoSummary, setVideoSummary] = useState<TrackingSummary | null>(null);
   const [countingLine, setCountingLine] = useState<CountingLine | null>(null);
   const [cameraProfiles, setCameraProfiles] = useState<CameraMeasurementProfile[]>(readCameraProfiles);
@@ -158,15 +166,39 @@ export function App() {
   const videoStageRef = useRef<HTMLDivElement | null>(null);
   const overlayAnimationRef = useRef<number | null>(null);
   const [videoFullscreen, setVideoFullscreen] = useState(false);
+  const [viewportSize, setViewportSize] = useState({ width: window.innerWidth, height: window.innerHeight });
+  const videoAspectRatio = session?.metadata && session.metadata.width > 0 && session.metadata.height > 0
+    ? session.metadata.width / session.metadata.height
+    : 16 / 9;
+  const fittedVideoWidth = Math.round(Math.min(viewportSize.width, viewportSize.height * videoAspectRatio));
+  const fittedVideoHeight = Math.round(fittedVideoWidth / videoAspectRatio);
+  const fittedVideoStyle = videoFullscreen ? { width: fittedVideoWidth, height: fittedVideoHeight } : undefined;
   const flowSummary = useMemo(
     () => countingLine ? countLineCrossings(detectionFramesRef.current, countingLine) : null,
     [countingLine, videoSummary],
   );
+  const riskCueEvents = useMemo(
+    () => summarizeRiskCueEvents(detectionFramesRef.current),
+    [videoSummary],
+  );
+  const persistentCuePairs = useMemo(
+    () => new Set(riskCueEvents.map((event) => riskCuePairKey(event.trackIds))),
+    [riskCueEvents],
+  );
 
   useEffect(() => {
-    const updateFullscreen = () => setVideoFullscreen(document.fullscreenElement === videoStageRef.current);
+    const updateFullscreen = () => {
+      setVideoFullscreen(document.fullscreenElement === videoStageRef.current);
+      setViewportSize({ width: window.innerWidth, height: window.innerHeight });
+    };
     document.addEventListener('fullscreenchange', updateFullscreen);
     return () => document.removeEventListener('fullscreenchange', updateFullscreen);
+  }, []);
+
+  useEffect(() => {
+    const updateViewport = () => setViewportSize({ width: window.innerWidth, height: window.innerHeight });
+    window.addEventListener('resize', updateViewport);
+    return () => window.removeEventListener('resize', updateViewport);
   }, []);
 
   useEffect(() => {
@@ -210,6 +242,10 @@ export function App() {
         if (typeof library.enabled !== 'boolean' || !Array.isArray(library.datasets)) return;
         setBenchmarkLibraryEnabled(library.enabled);
         setBenchmarkDatasets(library.datasets);
+        const firstAvailable = library.datasets
+          .flatMap((dataset) => dataset.clips.map((clip) => ({ dataset, clip })))
+          .find(({ clip }) => clip.can_analyze);
+        if (firstAvailable) setSelectedDemoKey((current) => current || `${firstAvailable.dataset.id}/${firstAvailable.clip.id}`);
       })
       .catch(() => undefined);
     const healthTimer = window.setInterval(() => {
@@ -294,9 +330,11 @@ export function App() {
       .then((body) => {
         if (!active) return;
         detectionFramesRef.current = body.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line) as {
-          type: string; timestamp_ms?: number | null; tracks?: RoadTrack[];
+          type: string; timestamp_ms?: number | null; tracks?: RoadTrack[]; risk_cues?: RiskCue[];
         }).filter((record) => record.type === 'frame').map((record) => ({
-          timestamp_ms: record.timestamp_ms ?? null, tracks: record.tracks ?? [],
+          timestamp_ms: record.timestamp_ms ?? null,
+          tracks: record.tracks ?? [],
+          risk_cues: record.risk_cues ?? [],
         }));
         const identities = new Map<number, string>();
         let peakInFrame = 0;
@@ -328,6 +366,11 @@ export function App() {
     setLineDraft(null);
     setSettingCountingLine(false);
     setVideoTracks([]);
+    setVideoRiskCues([]);
+    setCameraRiskCues([]);
+    detectionFramesRef.current = [];
+    setVideoRiskCues([]);
+    setCameraRiskCues([]);
     setExportError(null);
     setExportProgress(null);
     setSavedVideoUrl(null);
@@ -481,6 +524,8 @@ export function App() {
     setVideoSummary(null);
     setVideoTracks([]);
     setCameraTracks([]);
+    setVideoRiskCues([]);
+    setCameraRiskCues([]);
     detectionFramesRef.current = [];
     setCountingLine(null);
     setLineDraft(null);
@@ -533,6 +578,7 @@ export function App() {
       }
       const liveSession = payload as VideoSession;
       cameraStreamRef.current = stream;
+      cameraCueHistoryRef.current.clear();
       setSession(liveSession);
       setCameraActive(true);
       cameraFrameRef.current = 0;
@@ -602,6 +648,20 @@ export function App() {
             },
           } : current);
           setCameraTracks(Array.isArray(message.tracks) ? message.tracks as RoadTrack[] : []);
+          const timestampMs = Number(message.capture_timestamp_ms ?? Date.now());
+          const currentCues = Array.isArray(message.risk_cues) ? message.risk_cues as RiskCue[] : [];
+          const repeatedCues: RiskCue[] = [];
+          for (const cue of currentCues) {
+            const key = riskCuePairKey(cue.track_ids);
+            const previous = cameraCueHistoryRef.current.get(key);
+            const count = previous && timestampMs - previous.timestampMs <= 2500 ? previous.count + 1 : 1;
+            cameraCueHistoryRef.current.set(key, { count, timestampMs });
+            if (count >= 2) repeatedCues.push(cue);
+          }
+          for (const [key, value] of cameraCueHistoryRef.current) {
+            if (timestampMs - value.timestampMs > 3000) cameraCueHistoryRef.current.delete(key);
+          }
+          setCameraRiskCues(repeatedCues);
         } else if (message.type === 'error') {
           cameraInFlightRef.current = false;
           setSessionError(`Camera frame rejected (${String(message.code)}).`);
@@ -614,6 +674,7 @@ export function App() {
             dropped_frames: Number(message.dropped_frames ?? current.dropped_frames ?? 0),
           } : current);
           setCameraTracks([]);
+          setCameraRiskCues([]);
           releaseCamera();
         }
       };
@@ -642,7 +703,9 @@ export function App() {
     cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
     cameraStreamRef.current = null;
     cameraInFlightRef.current = false;
+    cameraCueHistoryRef.current.clear();
     setCameraTracks([]);
+    setCameraRiskCues([]);
     setCameraActive(false);
   }
 
@@ -660,8 +723,10 @@ export function App() {
     const maxGapMs = Math.max(1000 / frameRate * 1.6, 700);
     if (!selected || selected.timestamp_ms === null || target - selected.timestamp_ms > maxGapMs) {
       setVideoTracks([]);
+      setVideoRiskCues([]);
       return;
     }
+    setVideoRiskCues(selected.risk_cues.filter((cue) => persistentCuePairs.has(riskCuePairKey(cue.track_ids))));
     const canInterpolate = next?.timestamp_ms !== null && next?.timestamp_ms !== undefined
       && next.timestamp_ms > selected.timestamp_ms && next.timestamp_ms - selected.timestamp_ms <= maxGapMs;
     const progress = canInterpolate
@@ -937,6 +1002,10 @@ export function App() {
       const savedSession = (await response.json()) as VideoSession;
       releaseCamera();
       setCameraTracks([]);
+      setVideoTracks([]);
+      setVideoRiskCues([]);
+      setVideoSummary(null);
+      detectionFramesRef.current = [];
       setVideo(null);
       setCountingLine(null);
       setLineDraft(null);
@@ -974,13 +1043,20 @@ export function App() {
       <section className="workspace video-layout" aria-labelledby="welcome-title">
         <div className="scene">
           <div className="scene-header">
-            <div><p className="eyebrow">PERCEPTION WORKSPACE</p><h1 id="welcome-title">Road scene</h1></div>
-            <span className="state-pill"><span className="state-dot" />{busy ? friendlyStatus(session.status) : 'Ready for video'}</span>
+            <div>
+              <p className="eyebrow">ROAD SAFETY MVP</p>
+              <h1 id="welcome-title">Video analysis workspace</h1>
+              <p className="scene-subtitle">Run a real road clip, inspect tracked road users and review experimental trajectory cues.</p>
+            </div>
+            <span className={`state-pill${health?.status === 'healthy' ? ' connected' : ''}`}>
+              <span className="state-dot" />
+              {busy && session ? friendlyStatus(session.status) : health?.status === 'healthy' ? 'API connected' : health ? 'API degraded' : 'Connecting to API'}
+            </span>
           </div>
           <section className="video-workspace" aria-label="Video upload and processing">
             <div className="upload-card" id="video-workspace" ref={uploadCardRef} tabIndex={-1}>
-              <label className="eyebrow" htmlFor="road-video">UPLOAD A ROAD VIDEO</label>
-              <p className="upload-help">MP4, MOV, MKV, WebM, or AVI. The CPU analyzes selected frames; more samples take longer and can still miss fast events.</p>
+              <div className="control-heading"><span className="step-number">01</span><div><p className="eyebrow">START WITH FOOTAGE</p><h2>Choose a road video</h2></div></div>
+              <p className="upload-help">Use a local file or one of the included open-road demos. The backend analyzes selected frames; this local MVP does not connect to road CCTV.</p>
               <div className="upload-controls">
                 <input
                   id="road-video"
@@ -989,36 +1065,38 @@ export function App() {
                   onChange={chooseVideo}
                   disabled={busy}
                 />
-                <button type="button" onClick={uploadVideo} disabled={!video || busy}>
-                  {busy ? 'Processing…' : session && ['completed', 'stopped', 'failed'].includes(session.status) ? 'Process another video' : 'Process video'}
-                </button>
-                <button type="button" className="secondary-button" onClick={startCamera} disabled={busy || cameraActive}>
-                  Start camera
+                {video && <p className="selected-file">{video.name} | {formatBytes(video.size)}</p>}
+                <button className="primary-action" type="button" onClick={uploadVideo} disabled={!video || busy}>
+                  {busy ? 'Analyzing...' : 'Analyze video'}
                 </button>
               </div>
-              <div className="camera-settings">
-                <label>Video analysis rate
-                  <select value={analysisFps} onChange={(event) => setAnalysisFps(Number(event.target.value))} disabled={busy}>
-                    <option value={1}>1 FPS · fastest</option>
-                    <option value={2}>2 FPS · balanced</option>
-                    <option value={5}>5 FPS · more detail</option>
-                    <option value={10}>10 FPS · slowest</option>
-                  </select>
-                </label>
-                <label>Camera maximum size
-                  <select value={`${cameraSize.width}x${cameraSize.height}`} onChange={(event) => {
-                    const selected = CAMERA_SIZES.find((size) => `${size.width}x${size.height}` === event.target.value);
-                    if (selected) setCameraSize(selected);
-                  }} disabled={busy || cameraActive}>
-                    {CAMERA_SIZES.map((size) => <option key={size.width} value={`${size.width}x${size.height}`}>{size.width} Ã— {size.height}</option>)}
-                  </select>
-                </label>
-                <label>JPEG quality: {cameraQuality.toFixed(2)}
-                  <input type="range" min="0.5" max="0.95" step="0.05" value={cameraQuality}
-                    onChange={(event) => setCameraQuality(Number(event.target.value))} disabled={busy || cameraActive} />
-                </label>
-              </div>
-              {video && <p className="selected-file">{video.name} · {formatBytes(video.size)}</p>}
+              <details className="advanced-controls">
+                <summary>Advanced and camera settings</summary>
+                <div className="camera-settings">
+                  <label>Video samples per second
+                    <select value={analysisFps} onChange={(event) => setAnalysisFps(Number(event.target.value))} disabled={busy}>
+                      <option value={1}>1 FPS - faster</option>
+                      <option value={2}>2 FPS - balanced</option>
+                      <option value={5}>5 FPS - more detail</option>
+                      <option value={10}>10 FPS - slowest</option>
+                    </select>
+                  </label>
+                  <label>Browser camera maximum size
+                    <select value={`${cameraSize.width}x${cameraSize.height}`} onChange={(event) => {
+                      const selected = CAMERA_SIZES.find((size) => `${size.width}x${size.height}` === event.target.value);
+                      if (selected) setCameraSize(selected);
+                    }} disabled={busy || cameraActive}>
+                      {CAMERA_SIZES.map((size) => <option key={size.width} value={`${size.width}x${size.height}`}>{size.width} x {size.height}</option>)}
+                    </select>
+                  </label>
+                  <label>JPEG quality: {cameraQuality.toFixed(2)}
+                    <input type="range" min="0.5" max="0.95" step="0.05" value={cameraQuality}
+                      onChange={(event) => setCameraQuality(Number(event.target.value))} disabled={busy || cameraActive} />
+                  </label>
+                  <button type="button" className="secondary-button" onClick={startCamera} disabled={busy || cameraActive}>Start browser camera</button>
+                  <p className="camera-limit-note">This uses the camera attached to this browser. It is not an RTSP/CCTV connection.</p>
+                </div>
+              </details>
               {sessionError && <p className="error-message" role="alert">{sessionError}</p>}
               {uploadProgress > 0 && uploadProgress < 100 && (
                 <div className="progress-line" role="status">
@@ -1030,91 +1108,76 @@ export function App() {
 
             {benchmarkLibraryEnabled && <section className="benchmark-library" aria-labelledby="benchmark-library-title">
               <div className="benchmark-library-heading">
-                <div>
-                  <p className="eyebrow">LOCAL RESEARCH INPUTS</p>
-                  <h2 id="benchmark-library-title">Benchmark library</h2>
-                </div>
-                <span>Local only</span>
+                <div><span className="step-number">02</span><p className="eyebrow">READY-TO-RUN FOOTAGE</p><h2 id="benchmark-library-title">Demo clips</h2></div>
               </div>
-              <p className="benchmark-library-intro">Use real benchmark clips after reviewing their terms. Files stay in your local <code>datasets/</code> folder and the API mounts them read-only.</p>
-              {benchmarkDatasets.map((dataset) => (
-                <article className="benchmark-dataset" key={dataset.id}>
-                  <div className="benchmark-dataset-heading">
-                    <div><h3>{dataset.name}</h3><span>{dataset.camera_view}</span></div>
-                    <span className="benchmark-clip-count">{dataset.clips.length} local {dataset.clips.length === 1 ? 'clip' : 'clips'}</span>
-                  </div>
-                  <p>{dataset.purpose}</p>
-                  <p className="benchmark-limit">{dataset.limitation}</p>
-                  <div className="benchmark-links">
-                    <a href={dataset.source_url} target="_blank" rel="noreferrer">Official source</a>
-                    <a href={dataset.terms_url} target="_blank" rel="noreferrer">Usage terms</a>
-                    <span>{dataset.license_name}</span>
-                  </div>
-                  {dataset.clips.length === 0 ? (
-                    <p className="benchmark-empty">No clips registered. Review the source and terms, then add permitted files and their labels to <code>datasets/catalog.json</code>.</p>
-                  ) : <ul className="benchmark-clips">
-                    {dataset.clips.map((clip) => (
-                      <li key={clip.id}>
-                        <div>
-                          <strong>{clip.title}</strong>
-                          <span>{clip.event_type.replaceAll('_', ' ')}{clip.event_time_seconds === null ? '' : ` · reference at ${clip.event_time_seconds.toFixed(1)} s`}</span>
-                          <small>{!clip.rights_reviewed ? 'Usage terms not reviewed' : !clip.file_available ? 'Local video file missing' : `${clip.license_name} · ${clip.permitted_uses}${clip.privacy_reviewed ? ' · Privacy reviewed' : ' · Privacy review pending'}${clip.size_bytes ? ` · ${formatBytes(clip.size_bytes)}` : ''}`}</small>
-                        </div>
-                        <button type="button" onClick={() => void analyzeBenchmarkClip(dataset, clip)} disabled={!clip.can_analyze || busy}>
-                          {clip.can_analyze ? 'Analyze clip' : 'Unavailable'}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>}
-                </article>
-              ))}
-              {benchmarkDatasets.length === 0 && <p className="benchmark-empty">The catalog has no dataset entries yet. Add sources to <code>datasets/catalog.json</code>.</p>}
+              <p className="benchmark-library-intro">Real road scenes stored locally. Run a demo through the same analysis flow as an upload.</p>
+              {selectedDemo ? <>
+                <label className="demo-select-label" htmlFor="demo-clip-select">Choose a demo</label>
+                <select id="demo-clip-select" className="demo-clip-select" value={selectedDemoKey || `${selectedDemo.dataset.id}/${selectedDemo.clip.id}`} onChange={(event) => setSelectedDemoKey(event.target.value)} disabled={busy}>
+                  {demoOptions.map(({ dataset, clip }) => <option key={`${dataset.id}/${clip.id}`} value={`${dataset.id}/${clip.id}`}>{clip.title}</option>)}
+                </select>
+                <p className="demo-clip-meta">{selectedDemo.dataset.camera_view} | {selectedDemo.clip.creator_attribution ? `by ${selectedDemo.clip.creator_attribution} | ` : ''}{selectedDemo.clip.license_name}</p>
+                <p className="demo-privacy-note">Local demo only - privacy review pending before external sharing.</p>
+                <div className="demo-actions">
+                  <button className="primary-action" type="button" onClick={() => void analyzeBenchmarkClip(selectedDemo.dataset, selectedDemo.clip)} disabled={busy}>
+                    {benchmarkStarting ? 'Preparing demo...' : 'Run demo analysis'}
+                  </button>
+                  <a href={selectedDemo.clip.source_url} target="_blank" rel="noreferrer">View source</a>
+                </div>
+              </> : <div className="demo-unavailable">
+                <p>No local demo footage is registered yet.</p>
+                <code>.\scripts\download-open-road-demos.ps1</code>
+                <span>Run the command from the repository root, then restart the API.</span>
+              </div>}
             </section>}
             {videoSourceUrl && (
               <div className="video-viewer">
-              <div className="video-preview live-video video-stage" ref={videoStageRef} style={{ aspectRatio: session?.metadata ? `${session.metadata.width} / ${session.metadata.height}` : '16 / 9' }}>
-                <video ref={uploadedVideoRef} src={videoSourceUrl} controls controlsList="nofullscreen" preload="metadata" onTimeUpdate={updateVideoDetections} onPlay={animateVideoDetections} onPause={updateVideoDetections} onSeeked={updateVideoDetections} onError={() => setSessionError('The original upload is no longer available. It may have expired; upload the video again to review the overlay.')} aria-label="Road video preview with detection overlay" />
-                {session && ['completed', 'stopped'].includes(session.status) && session.processed_frames > 0 && session.metadata && (
-                  <svg
-                    className={`detection-overlay${settingCountingLine ? ' count-line-editor' : ''}`}
-                    viewBox={`0 0 ${session.metadata.width} ${session.metadata.height}`}
-                    aria-label={settingCountingLine ? 'Drag to draw a traffic count line' : 'Detected road objects'}
-                    onPointerDown={settingCountingLine ? (event) => startCountingLine(event, session.metadata!.width, session.metadata!.height) : undefined}
-                    onPointerMove={settingCountingLine ? (event) => moveCountingLine(event, session.metadata!.width, session.metadata!.height) : undefined}
-                    onPointerUp={settingCountingLine ? (event) => finishCountingLine(event, session.metadata!.width, session.metadata!.height) : undefined}
-                  >
-                    {videoTracks.map((track) => {
-                      const [x1, y1, x2, y2] = track.bbox_xyxy;
-                      const points = track.trail_xy.map(([x, y]) => `${x},${y}`).join(' ');
-                      const flagged = videoConflicts.some((conflict) => conflict.trackIds.includes(track.track_id));
-                      return <g key={track.track_id} className={flagged ? 'conflict-track' : undefined}>
-                        {track.trail_xy.length > 1 && <polyline className="track-trail" points={points} />}
-                        <rect className={flagged ? 'risk-track-box' : undefined} x={x1} y={y1} width={x2 - x1} height={y2 - y1} />
-                        {flagged && <circle className="risk-beacon" cx={x2 - 8} cy={y1 + 8} r="7" />}
-                        <text x={x1} y={Math.max(18, y1 - 5)}>#{track.track_id} {track.label}{track.speed_px_s === null ? '' : ` · ${track.speed_px_s.toFixed(0)} px/s`}</text>
-                      </g>;
-                    })}
-                    {(lineDraft ?? countingLine) && (() => {
-                      const line = lineDraft ?? countingLine!;
-                      return <g className="count-line-mark">
-                        <line x1={line.start.x} y1={line.start.y} x2={line.end.x} y2={line.end.y} />
-                        <circle cx={line.start.x} cy={line.start.y} r="9" />
-                        <circle cx={line.end.x} cy={line.end.y} r="9" />
-                        <text x={line.start.x + 12} y={line.start.y - 12}>A</text>
-                        <text x={line.end.x + 12} y={line.end.y - 12}>B</text>
-                      </g>;
-                    })()}
-                  </svg>
-                )}
-                <button type="button" className="fullscreen-button" onClick={toggleVideoFullscreen} aria-label={videoFullscreen ? 'Exit fullscreen video' : 'View video fullscreen'}>{videoFullscreen ? 'Exit fullscreen' : '⛶ Fullscreen'}</button>
+              <div className="video-preview live-video video-stage" ref={videoStageRef} style={{ aspectRatio: `${videoAspectRatio}` }}>
+                <div className="video-fit" style={fittedVideoStyle}>
+                  <video ref={uploadedVideoRef} src={videoSourceUrl} controls controlsList="nofullscreen" preload="metadata" onTimeUpdate={updateVideoDetections} onPlay={animateVideoDetections} onPause={updateVideoDetections} onSeeked={updateVideoDetections} onError={() => setSessionError('The original upload is no longer available. It may have expired; upload the video again to review the overlay.')} aria-label="Road video preview with detection overlay" />
+                  {session && ['completed', 'stopped'].includes(session.status) && session.processed_frames > 0 && session.metadata && (
+                    <svg
+                      className={`detection-overlay${settingCountingLine ? ' count-line-editor' : ''}`}
+                      viewBox={`0 0 ${session.metadata.width} ${session.metadata.height}`}
+                      preserveAspectRatio="none"
+                      aria-label={settingCountingLine ? 'Drag to draw a traffic count line' : 'Detected road objects'}
+                      onPointerDown={settingCountingLine ? (event) => startCountingLine(event, session.metadata!.width, session.metadata!.height) : undefined}
+                      onPointerMove={settingCountingLine ? (event) => moveCountingLine(event, session.metadata!.width, session.metadata!.height) : undefined}
+                      onPointerUp={settingCountingLine ? (event) => finishCountingLine(event, session.metadata!.width, session.metadata!.height) : undefined}
+                    >
+                      {videoTracks.map((track) => {
+                        const [x1, y1, x2, y2] = track.bbox_xyxy;
+                        const points = track.trail_xy.map(([x, y]) => `${x},${y}`).join(' ');
+                        const flagged = videoRiskCues.some((cue) => cue.track_ids.includes(track.track_id));
+                        return <g key={track.track_id} className={flagged ? 'conflict-track' : undefined}>
+                          {track.trail_xy.length > 1 && <polyline className="track-trail" points={points} />}
+                          <rect className={flagged ? 'risk-track-box' : undefined} x={x1} y={y1} width={x2 - x1} height={y2 - y1} />
+                          {flagged && <circle className="risk-beacon" cx={x2 - 8} cy={y1 + 8} r="7" />}
+                          <text x={x1} y={Math.max(18, y1 - 5)}>#{track.track_id} {track.label}{track.speed_px_s === null ? '' : ` | ${track.speed_px_s.toFixed(0)} px/s`}</text>
+                        </g>;
+                      })}
+                      {(lineDraft ?? countingLine) && (() => {
+                        const line = lineDraft ?? countingLine!;
+                        return <g className="count-line-mark">
+                          <line x1={line.start.x} y1={line.start.y} x2={line.end.x} y2={line.end.y} />
+                          <circle cx={line.start.x} cy={line.start.y} r="9" />
+                          <circle cx={line.end.x} cy={line.end.y} r="9" />
+                          <text x={line.start.x + 12} y={line.start.y - 12}>A</text>
+                          <text x={line.end.x + 12} y={line.end.y - 12}>B</text>
+                        </g>;
+                      })()}
+                    </svg>
+                  )}
+                </div>
+                <button type="button" className="fullscreen-button" onClick={toggleVideoFullscreen} aria-label={videoFullscreen ? 'Exit fullscreen video' : 'View video fullscreen'}>{videoFullscreen ? 'Exit fullscreen' : 'Fullscreen'}</button>
                 {session && ['completed', 'stopped'].includes(session.status) && session.processed_frames > 0 && <div className="tracking-readout">
                   <span>{videoTracks.length} tracked in this frame</span>
-                  <span>{session.analysis_fps ?? 2} analyzed FPS · boxes interpolate between samples</span>
+                  <span>{session.analysis_fps ?? 2} analyzed FPS | boxes interpolate between samples</span>
                 </div>}
               </div>
-              {videoConflicts.length > 0 && <div className="conflict-alert" role="status" aria-live="polite">
+              {videoRiskCues.length > 0 && <div className="conflict-alert" role="status" aria-live="polite">
                 <span className="conflict-beacon" aria-hidden="true" />
-                <div><strong>Potential trajectory conflict</strong><p>{videoConflicts.map((conflict) => `#${conflict.trackIds[0]} ${conflict.labels[0]} + #${conflict.trackIds[1]} ${conflict.labels[1]} · about ${conflict.timeToClosestApproachSeconds.toFixed(1)} s`).join(' | ')}</p></div>
+                <div><strong>Repeated trajectory cue · review only</strong><p>{videoRiskCues.map((cue) => `#${cue.track_ids[0]} ${cue.labels[0]} + #${cue.track_ids[1]} ${cue.labels[1]} · projected closest approach in ${cue.time_to_closest_approach_seconds.toFixed(1)} s`).join(' | ')}. Shown after repeated samples; this uncalibrated image-plane projection is not a crash prediction.</p></div>
               </div>}
               {session && ['completed', 'stopped'].includes(session.status) && session.processed_frames > 0 && session.source_type !== 'browser_camera' && (
                 <div className="count-line-tools">
@@ -1169,7 +1232,7 @@ export function App() {
                     {cameraTracks.map((track) => {
                       const [x1, y1, x2, y2] = track.bbox_xyxy;
                       const points = track.trail_xy.map(([x, y]) => `${x},${y}`).join(' ');
-                      const flagged = cameraConflicts.some((conflict) => conflict.trackIds.includes(track.track_id));
+                      const flagged = cameraRiskCues.some((cue) => cue.track_ids.includes(track.track_id));
                       return <g key={track.track_id} className={flagged ? 'conflict-track' : undefined}>
                         {track.trail_xy.length > 1 && <polyline className="track-trail" points={points} />}
                         <rect className={flagged ? 'risk-track-box' : undefined} x={x1} y={y1} width={x2 - x1} height={y2 - y1} />
@@ -1180,9 +1243,9 @@ export function App() {
                   </svg>
                 )}
                 <canvas ref={cameraCanvasRef} hidden />
-                {cameraConflicts.length > 0 && <div className="conflict-alert live-conflict-alert" role="status" aria-live="polite">
+                {cameraRiskCues.length > 0 && <div className="conflict-alert live-conflict-alert" role="status" aria-live="polite">
                   <span className="conflict-beacon" aria-hidden="true" />
-                  <div><strong>Potential trajectory conflict</strong><p>{cameraConflicts.map((conflict) => `#${conflict.trackIds[0]} + #${conflict.trackIds[1]} · ~${conflict.timeToClosestApproachSeconds.toFixed(1)} s`).join(' | ')}</p></div>
+                  <div><strong>Repeated trajectory cue · review only</strong><p>{cameraRiskCues.map((cue) => `#${cue.track_ids[0]} + #${cue.track_ids[1]} · projected closest approach in ${cue.time_to_closest_approach_seconds.toFixed(1)} s`).join(' | ')}. Shown after repeated samples; not a crash prediction.</p></div>
                 </div>}
               </div>
             )}
@@ -1213,7 +1276,7 @@ export function App() {
                       void player.play().catch(() => undefined);
                     }}>Jump to {session.benchmark.event_time_seconds.toFixed(1)} s</button>
                   </div>}
-                  <p>{session.benchmark.dataset_name} · {session.benchmark.license_name}{session.benchmark.annotation_reference ? ` · ${session.benchmark.annotation_reference}` : ''}</p>
+                  <p>{session.benchmark.dataset_name}{session.benchmark.creator_attribution ? ` · by ${session.benchmark.creator_attribution}` : ''} · {session.benchmark.license_name}{session.benchmark.annotation_reference ? ` · ${session.benchmark.annotation_reference}` : ''}</p>
                 </section>}
                 {session.status === 'uploading' && <p>Receiving {formatBytes(session.uploaded_bytes)}…</p>}
                 {session.status === 'queued' && <p>{session.error ?? 'Upload complete. Preparing the video decoder…'}</p>}
@@ -1243,6 +1306,30 @@ export function App() {
                     <div><span>Peak in frame</span><strong>{videoSummary.peakInFrame.toLocaleString()}</strong></div>
                     <div><span>Tracked classes</span><strong>{Object.entries(videoSummary.classes).map(([label, count]) => `${label} ${count}`).join(' · ') || 'None'}</strong></div>
                     <p>Prototype image-plane tracking. IDs may switch or split; motion is not calibrated to metres or km/h.</p>
+                  </section>
+                )}
+                {session.source_type !== 'browser_camera' && videoSummary && (
+                  <section className="risk-event-panel" aria-label="Experimental trajectory review cues">
+                    <div className="risk-event-heading">
+                      <div><p className="eyebrow">BACKEND REVIEW CUES</p><h3>Trajectory review</h3></div>
+                      <span>{riskCueEvents.length} {riskCueEvents.length === 1 ? 'episode' : 'episodes'}</span>
+                    </div>
+                    <p className="risk-event-explainer">The backend projects track motion in image pixels. Only track pairs appearing in at least two nearby samples are listed; one-off candidates stay in the developer report. These are review moments, not crash predictions.</p>
+                    {riskCueEvents.length > 0 ? <ol className="risk-event-list">
+                      {riskCueEvents.slice(0, 12).map((event, index) => (
+                        <li key={`${event.trackIds.join('-')}-${event.startMs}-${index}`}>
+                          <button type="button" className="risk-event-link" onClick={() => {
+                            const player = uploadedVideoRef.current;
+                            if (!player || event.startMs === null) return;
+                            player.currentTime = event.startMs / 1000;
+                            void player.play().catch(() => undefined);
+                          }}>
+                            <span><strong>#{event.trackIds[0]} {event.labels[0]} + #{event.trackIds[1]} {event.labels[1]}</strong><small>{event.samples} sampled cue{event.samples === 1 ? '' : 's'} · latest projection ~{event.latestTtc.toFixed(1)} s</small></span>
+                            <span className="risk-event-time">{formatCueTime(event.startMs)} <span aria-hidden="true">↗</span></span>
+                          </button>
+                        </li>
+                      ))}
+                    </ol> : <p className="risk-event-empty">No repeated trajectory cues in the sampled frames. This does not establish that the road scene is safe.</p>}
                   </section>
                 )}
                 {flowSummary && (
@@ -1332,15 +1419,16 @@ export function App() {
               </section>
             )}
 
-            {!session && !previewUrl && recentSessions.length === 0 && (
+            {!session && !videoSourceUrl && !cameraActive && (
               <div className="scene-empty">
-                <div className="road-icon" aria-hidden="true"><span /></div>
-                <h2>Choose a video to begin</h2>
-                <p>RodAI runs the configured detector on every frame and saves frame-aligned results. Detection outputs can be wrong and are not safety advice.</p>
+                <div className="scene-grid-art" aria-hidden="true"><span /><span /><span /></div>
+                <p className="eyebrow">CAMERA-FIRST WORKFLOW</p>
+                <h2>Your road footage appears here</h2>
+                <p>Choose a demo or upload a clip. RodAI will show sampled object tracks on the video and any experimental review cues below.</p>
               </div>
             )}
           </section>
-          <footer className="scene-footer">Experimental image-plane conflict cues use sampled prototype tracks. They are unvalidated and are not crash predictions or safety advice.</footer>
+          <footer className="scene-footer">Prototype only. Road-user tracks and trajectory cues are unvalidated; they do not predict or prevent crashes or support safety decisions.</footer>
         </div>
         <aside className="status-panel" aria-label="System status">
           <h2>System status</h2>
@@ -1360,7 +1448,7 @@ export function App() {
             ? 'The CPU detector loads when the first video analysis starts after an API restart. Once loaded, it stays ready until the service restarts.'
             : health?.model.status === 'failed'
               ? 'The detector could not load. Check the API service logs before retrying video analysis.'
-              : 'Red cues show track pairs whose current image-plane paths may converge soon. This experimental heuristic is unvalidated, may miss or falsely flag events, and does not predict or prevent crashes.'}</p>
+              : 'Trajectory cues are generated by the backend from sampled track motion in image pixels. They are experimental review evidence, not crash predictions or safety instructions.'}</p>
         </aside>
       </section>
       <footer className="app-footer">
